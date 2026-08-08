@@ -74,6 +74,10 @@ DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT,
 DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
 DEFAULT_UNIVERSAL_TRANSLATION_PROMPT,
 DEFAULT_UNIVERSAL_TRANSLATION_OFFLINE_PROMPT,
+DEFAULT_UNIVERSAL_TRANSLATION_GROUP_PROMPT,
+DEFAULT_UNIVERSAL_TRANSLATION_GROUP_OFFLINE_PROMPT,
+DEFAULT_DIALECT_CANTONESE_GROUP_PROMPT,
+DEFAULT_DIALECT_CANTONESE_GROUP_OFFLINE_PROMPT,
 resolveBilingualPrompt,
 } from "./bilingual-prompt-defaults";
 import { parseOfflineResponse, type ParsedOfflineResponse } from "./chat-offline-storage";
@@ -1787,15 +1791,24 @@ export async function buildChatPromptMessages(
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
     const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt();
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
-const chatBilingualInstruction = !session.isGroup
+const chatBilingualInstruction = session.isGroup
     ? session.universalTranslationMode
+        ? buildChatBilingualInstruction(true, "group", DEFAULT_UNIVERSAL_TRANSLATION_GROUP_PROMPT)
+        : session.dialectMode
+            ? buildChatBilingualInstruction(true, "group", DEFAULT_DIALECT_CANTONESE_GROUP_PROMPT)
+            : ""
+    : session.universalTranslationMode
         ? buildChatBilingualInstruction(true, "single", DEFAULT_UNIVERSAL_TRANSLATION_PROMPT)
         : session.dialectMode
             ? buildChatBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_PROMPT)
-            : buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
-    : "";
-    const offlineBilingualInstruction = !session.isGroup
+            : buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt);
+    const offlineBilingualInstruction = session.isGroup
     ? session.universalTranslationMode
+        ? buildOfflineBilingualInstruction(true, "group", DEFAULT_UNIVERSAL_TRANSLATION_GROUP_OFFLINE_PROMPT)
+        : session.dialectMode
+            ? buildOfflineBilingualInstruction(true, "group", DEFAULT_DIALECT_CANTONESE_GROUP_OFFLINE_PROMPT)
+            : ""
+    : session.universalTranslationMode
         ? buildOfflineBilingualInstruction(true, "single", DEFAULT_UNIVERSAL_TRANSLATION_OFFLINE_PROMPT)
         : session.dialectMode
             ? buildOfflineBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_OFFLINE_PROMPT)
@@ -1803,8 +1816,7 @@ const chatBilingualInstruction = !session.isGroup
                 session.bilingualTranslationEnabled !== false,
                 "single",
                 session.offlineBilingualTranslationPrompt,
-            )
-        : "";
+            );
 
     const llmMessages = assemblePromptPayload({
         character,
