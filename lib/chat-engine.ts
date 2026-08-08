@@ -68,6 +68,7 @@ import { isMediaStoreRef, loadMediaBlob } from "./media-cache-storage";
 import {
   DEFAULT_CHAT_BILINGUAL_PROMPT,
   DEFAULT_DIALECT_CANTONESE_PROMPT,
+  DEFAULT_DIALECT_CANTONESE_OFFLINE_PROMPT,
   DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT,
   DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT,
   DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
@@ -1774,15 +1775,17 @@ export async function buildChatPromptMessages(
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
     const chatBilingualInstruction = !session.isGroup
   ? session.dialectMode
-    ? buildChatBilingualInstruction(true, "single", session.bilingualTranslationPrompt && session.bilingualTranslationPrompt !== DEFAULT_CHAT_BILINGUAL_PROMPT ? session.bilingualTranslationPrompt : DEFAULT_DIALECT_CANTONESE_PROMPT)
+    ? buildChatBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_PROMPT)
     : buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
   : "";
     const offlineBilingualInstruction = !session.isGroup
-        ? buildOfflineBilingualInstruction(
-            session.bilingualTranslationEnabled !== false,
-            "single",
-            session.offlineBilingualTranslationPrompt,
-        )
+        ? session.dialectMode
+            ? buildOfflineBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_OFFLINE_PROMPT)
+            : buildOfflineBilingualInstruction(
+                session.bilingualTranslationEnabled !== false,
+                "single",
+                session.offlineBilingualTranslationPrompt,
+            )
         : "";
 
     const llmMessages = assemblePromptPayload({
