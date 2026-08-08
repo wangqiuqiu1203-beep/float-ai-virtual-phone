@@ -1,7 +1,7 @@
 {
-    "name": "float",
-    "short_name": "float",
-    "description": "float",
+    "name": "Eos",
+    "short_name": "Eos",
+    "description": "Eos - AI Virtual Phone",
     "id": "/",
     "start_url": "/",
     "scope": "/",
