@@ -45,19 +45,17 @@ function isUnsupportedPresetFormat(obj: Record<string, unknown>): boolean {
 }
 
 /** World book shapes with unsupported root/entry fields. */
-const UNSUPPORTED_WB_ROOT_FIELDS = ["recursiveScan", "caseSensitive", "originalData", "globalSelect"];
-const UNSUPPORTED_WB_ENTRY_FIELDS = ["selectiveLogic", "secondary_keys", "extensions", "characterFilter", "vectorized"];
+const UNSUPPORTED_WB_ROOT_FIELDS = ["recursiveScan", "caseSensitive", "globalSelect"];
+const UNSUPPORTED_WB_ENTRY_FIELDS = ["secondary_keys", "extensions", "characterFilter", "vectorized"];
 
 function isUnsupportedWorldBookFormat(obj: Record<string, unknown>): boolean {
-    // Root-level external fields
-    if (UNSUPPORTED_WB_ROOT_FIELDS.some(f => f in obj)) return true;
-    // Dictionary entries are treated as unsupported import format
-    if (obj.entries && typeof obj.entries === "object" && !Array.isArray(obj.entries)) return true;
-    // Check entry-level external fields
-    const entries = Array.isArray(obj.entries) ? obj.entries : (obj.entries && typeof obj.entries === "object" ? Object.values(obj.entries) : []);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (entries.length > 0 && entries.some((e: any) => e && UNSUPPORTED_WB_ENTRY_FIELDS.some(f => f in e))) return true;
-    return false;
+// Root-level external fields
+if (UNSUPPORTED_WB_ROOT_FIELDS.some(f => f in obj)) return true;
+// Dictionary entries are supported (SillyTavern-style)
+const entries = Array.isArray(obj.entries) ? obj.entries : (obj.entries && typeof obj.entries === "object" ? Object.values(obj.entries) : []);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+if (entries.length > 0 && entries.some((e: any) => e && UNSUPPORTED_WB_ENTRY_FIELDS.some(f => f in e))) return true;
+return false;
 }
 
 // --- Keys ---
@@ -419,16 +417,34 @@ export function parseWorldBookFromJson(text: string): WorldBookConfig | null {
 
         if (isUnsupportedWorldBookFormat(obj)) throw new Error(UNSUPPORTED_IMPORT_FORMAT);
 
-        const wb = createWorldBook(obj.name || "导入的世界书");
-        if (Array.isArray(obj.entries)) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const parsedEntries = obj.entries.map((e: any) => parseWorldBookEntry(e));
+        const originalName = typeof obj.originalData === "object" && obj.originalData !== null
+            ? String((obj.originalData as Record<string, unknown>).name ?? "")
+            : "";
+        const originalDesc = typeof obj.originalData === "object" && obj.originalData !== null
+            ? String((obj.originalData as Record<string, unknown>).description ?? "")
+            : "";
+        const wb = createWorldBook(String(obj.name || originalName || "导入的世界书"));
+        if (originalDesc) wb.description = originalDesc;
 
-            // Note: some formats might use dictionary-shaped entries.
-            wb.entries = parsedEntries;
-        } else if (typeof obj.entries === "object" && obj.entries !== null) {
+        if (Array.isArray(obj.entries) || (typeof obj.entries === "object" && obj.entries !== null)) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const parsedEntries = Object.values(obj.entries).map((e: any) => parseWorldBookEntry(e));
+            const rawEntries = Array.isArray(obj.entries) ? obj.entries : Object.values(obj.entries as Record<string, unknown>);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let parsedEntries = rawEntries.map((e: any) => parseWorldBookEntry(e));
+
+            // SillyTavern-style: same order value with displayIndex -> reorder by displayIndex
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const rawArr = rawEntries as any[];
+            if (rawArr.length > 1 && rawArr.every((e: any) => e && e.displayIndex !== undefined)) {
+                const orders = new Set(rawArr.map((e: any) => e.order));
+                if (orders.size <= 1) {
+                    parsedEntries = [...parsedEntries]
+                        .map((entry, idx) => ({ entry, displayIndex: Number(rawArr[idx]?.displayIndex) || idx }))
+                        .sort((a, b) => a.displayIndex - b.displayIndex)
+                        .map((item, idx) => ({ ...item.entry, insertion_order: idx }));
+                }
+            }
+
             wb.entries = parsedEntries;
         }
 
