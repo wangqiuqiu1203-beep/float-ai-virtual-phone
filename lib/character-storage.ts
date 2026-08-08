@@ -159,12 +159,54 @@ export type CharacterImportData = Omit<
   Character,
   "id" | "createdAt" | "updatedAt"
 >;
-
+// ── SillyTavern（酒馆）角色卡支持 ────────────────────
+/** 判断是否为 SillyTavern V2/V3 角色卡（PNG 的 chara 块或对应 JSON） */
+function isSillyTavernCard(obj: Record<string, unknown>): boolean {
+  if (typeof obj.spec === "string" && obj.spec.startsWith("chara_card_")) return true;
+  if ("schema" in obj) return false;
+  const data = obj.data && typeof obj.data === "object" ? (obj.data as Record<string, unknown>) : obj;
+  return typeof data.name === "string" && (typeof data.description === "string" || typeof data.first_mes === "string");
+}
+/** 提取酒馆卡的角色数据：V3 在 data 字段里，V2 是裸字段 */
+function extractSillyTavernData(obj: Record<string, unknown>): Record<string, unknown> {
+  if (
+    typeof obj.spec === "string" &&
+    obj.spec.startsWith("chara_card_") &&
+    typeof obj.data === "object" &&
+    obj.data !== null
+  ) {
+    return obj.data as Record<string, unknown>;
+  }
+  return obj;
+}
+/** 酒馆卡字段 → AI Virtual Phone 角色卡映射 */
+function parseSillyTavernData(data: Record<string, unknown>): CharacterImportData {
+  const name = String(data.name ?? "").trim();
+  const description = typeof data.description === "string" ? data.description : "";
+  const personality = typeof data.personality === "string" ? data.personality.trim() : "";
+  const scenario = typeof data.scenario === "string" && data.scenario.trim() ? data.scenario.trim() : "";
+  const firstMes = typeof data.first_mes === "string" && data.first_mes.trim() ? data.first_mes.trim() : "";
+  const parts = [description];
+  if (scenario) parts.push(`【场景】\n${scenario}`);
+  if (firstMes) parts.push(`【开场白】\n${firstMes}`);
+  return {
+    name,
+    persona: parts.filter(Boolean).join("\n\n"),
+    personality: personality || undefined,
+    avatar: null,
+    tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
+  };
+}
 export function parseCharacterFromJson(
   text: string
 ): CharacterImportData | null {
   try {
     const obj = JSON.parse(text) as Record<string, unknown>;
+
+    // SillyTavern 酒馆卡（V2/V3）直接解析，绕过拦截
+    if (isSillyTavernCard(obj)) {
+      return parseSillyTavernData(extractSillyTavernData(obj));
+    }
 
     // Helper: validate avatar — only accept data-URLs and http(s) URLs
     function validAvatar(v: unknown): string | null {
@@ -263,16 +305,29 @@ export function parseCharacterFromPng(
   buffer: ArrayBuffer
 ): CharacterImportData | null {
   const u8 = new Uint8Array(buffer);
+  // 自家格式优先
   const charaBase64 = readPngTextChunk(u8, "ai_phone_character");
-  if (!charaBase64) return null;
-
-  try {
-    const jsonStr = decodeURIComponent(escape(atob(charaBase64)));
-    return parseCharacterFromJson(jsonStr);
-  } catch (e) {
-    if (e instanceof Error && e.message === CHAR_BLOCKED_FIELDS) throw e;
-    return null;
+  if (charaBase64) {
+    try {
+      const jsonStr = decodeURIComponent(escape(atob(charaBase64)));
+      return parseCharacterFromJson(jsonStr);
+    } catch (e) {
+      if (e instanceof Error && e.message === CHAR_BLOCKED_FIELDS) throw e;
+      return null;
+    }
   }
+  // SillyTavern 酒馆卡（chara 块，V2/V3 通用）
+  const tavernBase64 = readPngTextChunk(u8, "chara");
+  if (tavernBase64) {
+    try {
+      const jsonStr = decodeURIComponent(escape(atob(tavernBase64)));
+      return parseCharacterFromJson(jsonStr);
+    } catch (e) {
+      if (e instanceof Error && e.message === CHAR_BLOCKED_FIELDS) throw e;
+      return null;
+    }
+  }
+  return null;
 }
 
 // ── CRC32 ────────────────────────────────────────────
