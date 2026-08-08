@@ -415,7 +415,14 @@ export function parseWorldBookFromJson(text: string): WorldBookConfig | null {
         const obj = JSON.parse(text);
         if (!obj || typeof obj !== "object") return null;
 
-        if (isUnsupportedWorldBookFormat(obj)) throw new Error(UNSUPPORTED_IMPORT_FORMAT);
+        // Lenient parsing: as long as an entries structure exists (array or dict),
+        // try to import it. Unknown/external fields are ignored instead of rejected.
+        if (isUnsupportedWorldBookFormat(obj)) {
+            // keep throwing only for shapes that can never be a worldbook
+            const hasEntries = Array.isArray(obj.entries)
+                || (typeof obj.entries === "object" && obj.entries !== null && Object.keys(obj.entries as Record<string, unknown>).length > 0);
+            if (!hasEntries) throw new Error(UNSUPPORTED_IMPORT_FORMAT);
+        }
 
         const originalName = typeof obj.originalData === "object" && obj.originalData !== null
             ? String((obj.originalData as Record<string, unknown>).name ?? "")

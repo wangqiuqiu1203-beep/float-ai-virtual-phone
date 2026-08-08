@@ -5,7 +5,7 @@
 
 import JSZip from "jszip";
 import type { WorldBookConfig, WorldBookEntry } from "./settings-types";
-import { createWorldBook } from "./settings-storage";
+import { createWorldBook, parseWorldBookFromJson } from "./settings-storage";
 
 /** 把 docx 的 document.xml 转成带换行的纯文本（按文档顺序混合提取）。 */
 function docxXmlToText(xml: string): string {
@@ -23,7 +23,12 @@ function docxXmlToText(xml: string): string {
 
 /** 读取 .docx 文件，返回纯文本（段落按换行分隔）。 */
 export async function parseDocxFileToText(file: File): Promise<string> {
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  return parseDocxArrayBufferToText(await file.arrayBuffer());
+}
+
+/** 从 docx 的 ArrayBuffer 提取纯文本。 */
+export async function parseDocxArrayBufferToText(buffer: ArrayBuffer): Promise<string> {
+  const zip = await JSZip.loadAsync(buffer);
   const entry = zip.file("word/document.xml");
   if (!entry) throw new Error("不是有效的 docx 文件（缺少 word/document.xml）");
   const xml = await entry.async("string");
@@ -231,4 +236,80 @@ export function buildWorldBookFromText(
   const wb = createWorldBook(fallbackName);
   wb.entries = entries;
   return wb;
+}
+
+// --- ZIP 世界书包（递归解压） ──────────────────────────────
+
+const MAX_ZIP_DEPTH = 6;
+
+/** 解析一个世界书包文件：递归解压 zip（含嵌套 zip），收集其中的 docx/txt/md/json 并转为独立世界书。 */
+export async function parseWorldBookZip(file: File): Promise<WorldBookConfig[]> {
+  const results: WorldBookConfig[] = [];
+  const seenNames = new Set<string>();
+  await walkZipBuffer(await file.arrayBuffer(), results, seenNames, 0);
+  return results;
+}
+
+async function walkZipBuffer(
+  buffer: ArrayBuffer,
+  results: WorldBookConfig[],
+  seenNames: Set<string>,
+  depth: number,
+): Promise<void> {
+  if (depth > MAX_ZIP_DEPTH) return;
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(buffer);
+  } catch {
+    return; // 不是有效 zip，跳过
+  }
+
+  const tasks: Promise<void>[] = [];
+  zip.forEach((relPath, entry) => {
+    if (entry.dir) return;
+    const lower = relPath.toLowerCase();
+    const baseName = relPath.split("/").pop()?.replace(/\.[^.]+$/, "").trim() || "导入的世界书";
+
+    if (lower.endsWith(".zip")) {
+      tasks.push(
+        entry.async("arraybuffer").then((buf) => walkZipBuffer(buf, results, seenNames, depth + 1)),
+      );
+    } else if (lower.endsWith(".json")) {
+      tasks.push(
+        entry.async("string").then(async (text) => {
+          try {
+            const wb = parseWorldBookFromJson(text);
+            if (wb && wb.entries.length > 0) pushUnique(wb, results, seenNames);
+          } catch {
+            // 单个文件失败不影响其他文件
+          }
+        }),
+      );
+    } else if (lower.endsWith(".docx")) {
+      tasks.push(
+        entry.async("arraybuffer").then(async (buf) => {
+          try {
+            const text = await parseDocxArrayBufferToText(buf);
+            if (text.trim()) pushUnique(buildWorldBookFromText(text, baseName), results, seenNames);
+          } catch {
+            // 单个文件失败不影响其他文件
+          }
+        }),
+      );
+    } else if (lower.endsWith(".txt") || lower.endsWith(".md")) {
+      tasks.push(
+        entry.async("string").then((text) => {
+          if (text.trim()) pushUnique(buildWorldBookFromText(text, baseName), results, seenNames);
+        }),
+      );
+    }
+  });
+  await Promise.all(tasks);
+}
+
+function pushUnique(wb: WorldBookConfig, results: WorldBookConfig[], seenNames: Set<string>): void {
+  const key = wb.name;
+  if (seenNames.has(key)) return;
+  seenNames.add(key);
+  results.push(wb);
 }

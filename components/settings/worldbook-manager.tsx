@@ -305,8 +305,18 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                 }
                 persist([parsed, ...books]);
                 setActiveBookId(parsed.id);
-            } else {
-                // .docx / .txt / .md：解析纯文本后自动拆分词条
+            } else if (lowerName.endsWith(".zip")) {
+                // ZIP 世界书包：递归解压，自动识别 docx/txt/md/json，每份文件导入为独立世界书
+                const { parseWorldBookZip } = await import("@/lib/worldbook-docx-import");
+                const imported = await parseWorldBookZip(file);
+                if (!imported.length) {
+                    setImportError("ZIP 中没有找到可导入的世界书文件（支持 .docx / .txt / .md / .json）。");
+                    return;
+                }
+                persist([...imported, ...books]);
+                setActiveBookId(imported[0].id);
+            } else if (lowerName.endsWith(".docx") || lowerName.endsWith(".txt") || lowerName.endsWith(".md")) {
+                // 单文档：解析纯文本后自动拆分词条
                 const { readWorldBookSourceText, buildWorldBookFromText } = await import("@/lib/worldbook-docx-import");
                 const text = await readWorldBookSourceText(file);
                 if (!text.trim()) {
@@ -321,6 +331,8 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                 }
                 persist([wb, ...books]);
                 setActiveBookId(wb.id);
+            } else {
+                setImportError("不支持的文件格式，请选择 .json / .docx / .txt / .md 或 .zip 世界书包。");
             }
         } catch (err) {
             if (err instanceof Error && err.message === UNSUPPORTED_IMPORT_FORMAT) {
@@ -381,7 +393,7 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
 
     return (
         <div ref={wbContainerRef} className="flex flex-col gap-5 h-full">
-            <input type="file" accept=".json,.docx,.txt,.md" className="hidden" ref={fileInputRef} onChange={handleImport} />
+            <input type="file" accept=".json,.docx,.txt,.md,.zip" className="hidden" ref={fileInputRef} onChange={handleImport} />
             {viewMode === "list" ? (
                 <>
                     <div className="flex items-center">
