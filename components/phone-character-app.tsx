@@ -48,6 +48,9 @@ import {
   parseWorldBookFromJson,
   loadWorldBooks,
   saveWorldBooks,
+  parseRegexFromJson,
+  loadRegexes,
+  saveRegexes,
   loadBindingConfig,
   getCharacterBinding,
   setCharacterBinding,
@@ -902,6 +905,24 @@ function CharListView({
           // 绑定失败不影响导入
         }
         notices.push(`世界书「${wb.name}」(${wb.entries.length}条，已绑定角色)`);
+      }
+    }
+    if (bundle.regexScriptsJson) {
+      const group = parseRegexFromJson(bundle.regexScriptsJson, characterName ? `${characterName}·正则` : "导入的正则组");
+      if (group) {
+        saveRegexes([...loadRegexes(), group]);
+        try {
+          const config = loadBindingConfig();
+          const binding = getCharacterBinding(config, characterId);
+          const defaults = {
+            ...binding.defaults,
+            regexIds: [...(binding.defaults.regexIds ?? []), group.id],
+          };
+          saveBindingConfig(setCharacterBinding(config, { ...binding, defaults }));
+        } catch {
+          // 绑定失败不影响导入
+        }
+        notices.push(`正则组「${group.name}」(${group.rules.length}条，已绑定角色)`);
       }
     }
     if (bundle.emoteAssets.length > 0) {

@@ -197,15 +197,17 @@ function parseSillyTavernData(data: Record<string, unknown>): CharacterImportDat
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
   };
 }
-/** 酒馆卡整包附加内容（世界书 / 表情包），用于「导入一张卡，内容自动分发」 */
+/** 酒馆卡整包附加内容（世界书 / 正则脚本 / 表情包），用于「导入一张卡，内容自动分发」 */
 export type TavernBundleExtra = {
   worldBookJson: string | null;
+  regexScriptsJson: string | null;
   emoteAssets: { name: string; dataUrl: string }[];
 };
 
 /**
  * 从酒馆卡对象中提取附加内容：
- * - 世界书：V2 在顶层 character_book，V3 在 data.extensions.world_book
+ * - 世界书：V2 在顶层 character_book；V3 在 data.character_book（部分卡在 data.extensions.world_book）
+ * - 正则脚本：data.extensions.regex_scripts（酒馆正则，包装成 { rules: [...] } 供 parseRegexFromJson 使用）
  * - 表情/立绘：V3 的 data.extensions.assets（type: emote / expression）
  */
 export function extractTavernBundle(
@@ -213,12 +215,19 @@ export function extractTavernBundle(
 ): TavernBundleExtra | null {
   if (!isSillyTavernCard(obj)) return null;
   const data = extractSillyTavernData(obj);
+  const rawData = data as { character_book?: unknown; extensions?: Record<string, unknown> };
   const rawObj = obj as { character_book?: unknown };
-  const extensions = (data as { extensions?: Record<string, unknown> }).extensions;
-  // 世界书
-  const rawWb = rawObj.character_book ?? extensions?.world_book ?? null;
+  const extensions = rawData.extensions;
+  // 世界书（V2/V3 通用：data.character_book / 顶层 character_book / extensions.world_book）
+  const rawWb = rawData.character_book ?? rawObj.character_book ?? extensions?.world_book ?? null;
   const worldBookJson =
     rawWb && typeof rawWb === "object" && rawWb !== null ? JSON.stringify(rawWb) : null;
+  // 正则脚本（酒馆 regex_scripts 数组 → 包装成项目组格式）
+  const regexScripts = Array.isArray(extensions?.regex_scripts)
+    ? (extensions.regex_scripts as unknown[])
+    : [];
+  const regexScriptsJson =
+    regexScripts.length > 0 ? JSON.stringify({ rules: regexScripts }) : null;
   // 表情/立绘资源
   const assets = Array.isArray(extensions?.assets)
     ? (extensions.assets as { type?: string; name?: string; content?: string }[])
@@ -234,7 +243,7 @@ export function extractTavernBundle(
           a.content.startsWith("https://"))
     )
     .map((a) => ({ name: String(a.name || "表情"), dataUrl: a.content as string }));
-  return { worldBookJson, emoteAssets };
+  return { worldBookJson, regexScriptsJson, emoteAssets };
 }
 
 /** 从酒馆卡 PNG（chara 块）中提取附加内容 */
