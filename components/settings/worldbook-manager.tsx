@@ -285,31 +285,52 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
         }
     };
 
-    const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
+        const lowerName = (file.name || "").toLowerCase();
 
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            try {
-                const text = event.target?.result as string;
+        try {
+            if (lowerName.endsWith(".json")) {
+                const text = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => resolve(String(ev.target?.result ?? ""));
+                    reader.onerror = () => reject(new Error("读取文件失败"));
+                    reader.readAsText(file);
+                });
                 const parsed = parseWorldBookFromJson(text);
-                if (parsed) {
-                    persist([parsed, ...books]);
-                    setActiveBookId(parsed.id);
-                } else {
+                if (!parsed) {
                     setImportError("无法解析世界书文件，格式不正确。");
+                    return;
                 }
-            } catch (e) {
-                if (e instanceof Error && e.message === UNSUPPORTED_IMPORT_FORMAT) {
-                    setImportError("不支持该世界书格式");
-                } else {
-                    setImportError("无法解析世界书文件，格式不正确。");
+                persist([parsed, ...books]);
+                setActiveBookId(parsed.id);
+            } else {
+                // .docx / .txt / .md：解析纯文本后自动拆分词条
+                const { readWorldBookSourceText, buildWorldBookFromText } = await import("@/lib/worldbook-docx-import");
+                const text = await readWorldBookSourceText(file);
+                if (!text.trim()) {
+                    setImportError("文件中没有可提取的文本内容。");
+                    return;
                 }
+                const baseName = file.name.replace(/\.(docx|txt|md)$/i, "").trim() || "导入的世界书";
+                const wb = buildWorldBookFromText(text, baseName);
+                if (!wb.entries.length) {
+                    setImportError("未能从文件中拆分出有效词条。");
+                    return;
+                }
+                persist([wb, ...books]);
+                setActiveBookId(wb.id);
             }
-        };
-        reader.readAsText(file);
-        if (fileInputRef.current) fileInputRef.current.value = "";
+        } catch (err) {
+            if (err instanceof Error && err.message === UNSUPPORTED_IMPORT_FORMAT) {
+                setImportError("不支持该世界书格式");
+            } else {
+                setImportError("无法解析世界书文件：" + (err instanceof Error ? err.message : "格式不正确"));
+            }
+        } finally {
+            if (fileInputRef.current) fileInputRef.current.value = "";
+        }
     };
 
     const handleExport = async (book: WorldBookConfig) => {
@@ -360,7 +381,7 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
 
     return (
         <div ref={wbContainerRef} className="flex flex-col gap-5 h-full">
-            <input type="file" accept=".json" className="hidden" ref={fileInputRef} onChange={handleImport} />
+            <input type="file" accept=".json,.docx,.txt,.md" className="hidden" ref={fileInputRef} onChange={handleImport} />
             {viewMode === "list" ? (
                 <>
                     <div className="flex items-center">
