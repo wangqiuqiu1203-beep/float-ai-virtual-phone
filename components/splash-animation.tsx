@@ -58,18 +58,13 @@ function drawPillPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: nu
   ctx.closePath();
 }
 
-function drawBalloonPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, h: number, organic = 0) {
-  const ow = w * (1 + organic * 0.025);
-  const oh = h * (1 - organic * 0.015);
-  const topY = cy - oh * 0.5;
-  const botY = cy + oh * 0.48;
+function drawHeartPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number, h: number) {
+  const tipY = cy + h * 0.42;
+  const topY = cy - h * 0.38;
   ctx.beginPath();
-  ctx.moveTo(cx, topY);
-  ctx.bezierCurveTo(cx + ow * 0.39, topY + oh * 0.015, cx + ow * 0.52, cy - oh * 0.19, cx + ow * 0.49, cy + oh * 0.07);
-  ctx.bezierCurveTo(cx + ow * 0.47, cy + oh * 0.31, cx + ow * 0.27, botY - oh * 0.01, cx + ow * 0.075, botY);
-  ctx.bezierCurveTo(cx + ow * 0.035, botY + oh * 0.015, cx - ow * 0.035, botY + oh * 0.015, cx - ow * 0.075, botY);
-  ctx.bezierCurveTo(cx - ow * 0.28, botY - oh * 0.005, cx - ow * 0.47, cy + oh * 0.31, cx - ow * 0.49, cy + oh * 0.07);
-  ctx.bezierCurveTo(cx - ow * 0.52, cy - oh * 0.19, cx - ow * 0.39, topY + oh * 0.015, cx, topY);
+  ctx.moveTo(cx, tipY);
+  ctx.bezierCurveTo(cx - w * 0.52, tipY - h * 0.05, cx - w * 0.6, topY + h * 0.08, cx, topY + h * 0.1);
+  ctx.bezierCurveTo(cx + w * 0.6, topY + h * 0.08, cx + w * 0.52, tipY - h * 0.05, cx, tipY);
   ctx.closePath();
 }
 
@@ -239,95 +234,135 @@ export function SplashAnimation() {
         ctx.save();
         ctx.translate(cx, cy);
         ctx.scale(this.scale * squish, this.scale * squish);
+        if (m > 0.5) ctx.rotate(Math.sin(this.swayPhase + this.idx) * (this.side === "right" ? 0.15 : 0.09));
         const target = Math.max(this.w, this.h);
         const sw = lerp(this.w, target * 0.46 * this.balloonScale, m);
         const sh = lerp(this.h, target * 0.62 * this.balloonScale, m);
         const radius = lerp(this.h / 2, Math.min(sw, sh) * 0.46, m);
         const softEdge = Math.pow(1 - clamp(m / 0.72, 0, 1), 1.8);
-        if (softEdge > 0.01) {
-          ctx.shadowColor = this.side === "left" ? `rgba(255,255,255,${0.68 * softEdge})` : `rgba(26,60,240,${0.24 * softEdge})`;
-          ctx.shadowBlur = this.side === "left" ? 10 * softEdge : 14 * softEdge;
-        }
-        const drawBubbleShape = () => {
-          if (m < 0.985) drawPillPath(ctx, -sw / 2, -sh / 2, sw, sh, radius);
-          else drawBalloonPath(ctx, 0, 0, sw, sh, Math.sin(this.swayPhase + this.idx));
-        };
-        const drawExpandedBubbleShape = (expand: number) => {
-          if (m < 0.985) {
-            drawPillPath(ctx, -sw / 2 - expand, -sh / 2 - expand, sw + expand * 2, sh + expand * 2, radius + expand);
-          } else {
-            drawBalloonPath(ctx, 0, 0, sw + expand * 2, sh + expand * 2, Math.sin(this.swayPhase + this.idx));
-          }
-        };
-        const fillColor = this.side === "right" ? KLEIN : "#FFFFFF";
-        ctx.fillStyle = fillColor;
         const edgeBlur = 2.4 * softEdge;
-        if (edgeBlur > 0.06 && useSoftEdgeFallback) {
-          ctx.shadowColor = "transparent";
-          const blurSize = Math.max(1.2, edgeBlur * 1.35);
-          const passes = [
-            { expand: blurSize * 2.2, alpha: 0.07 },
-            { expand: blurSize * 1.55, alpha: 0.12 },
-            { expand: blurSize * 0.95, alpha: 0.20 },
-            { expand: blurSize * 0.42, alpha: 0.34 },
-            { expand: 0, alpha: 0.58 }
-          ];
-          ctx.save();
-          for (const pass of passes) {
-            ctx.globalAlpha = pass.alpha;
-            drawExpandedBubbleShape(pass.expand);
+        // 交叉淡变：文字气泡淡出 → 爱心/水泡弹入飘升
+        const pillA = 1 - clamp((m - 0.3) / 0.3, 0, 1);
+        const popIn = clamp((m - 0.28) / 0.5, 0, 1);
+        const popScale = 0.7 + 0.3 * easeOutBack(popIn);
+        const isRight = this.side === "right";
+        const hw = target * 0.5 * this.balloonScale * popScale;
+        const hh = target * 0.64 * this.balloonScale * popScale;
+        // ── 1) 文字气泡（淡出阶段） ──
+        if (pillA > 0.01) {
+          ctx.globalAlpha = pillA;
+          if (softEdge > 0.01) {
+            ctx.shadowColor = isRight ? `rgba(169,111,107,${0.3 * softEdge})` : `rgba(255,255,255,${0.68 * softEdge})`;
+            ctx.shadowBlur = isRight ? 14 * softEdge : 10 * softEdge;
+          }
+          const drawPillShape = () => drawPillPath(ctx, -sw / 2, -sh / 2, sw, sh, radius);
+          const drawExpandedPill = (expand: number) => drawPillPath(ctx, -sw / 2 - expand, -sh / 2 - expand, sw + expand * 2, sh + expand * 2, radius + expand);
+          ctx.fillStyle = isRight ? KLEIN : "#FFFFFF";
+          if (edgeBlur > 0.06 && useSoftEdgeFallback) {
+            ctx.shadowColor = "transparent";
+            const blurSize = Math.max(1.2, edgeBlur * 1.35);
+            const passes = [
+              { expand: blurSize * 2.2, alpha: 0.07 },
+              { expand: blurSize * 1.55, alpha: 0.12 },
+              { expand: blurSize * 0.95, alpha: 0.20 },
+              { expand: blurSize * 0.42, alpha: 0.34 },
+              { expand: 0, alpha: 0.58 }
+            ];
+            ctx.save();
+            for (const pass of passes) {
+              ctx.globalAlpha = pillA * pass.alpha;
+              drawExpandedPill(pass.expand);
+              ctx.fill();
+            }
+            ctx.restore();
+          } else {
+            drawPillShape();
+            ctx.filter = edgeBlur > 0.06 ? `blur(${edgeBlur}px)` : "none";
             ctx.fill();
+            ctx.filter = "none";
           }
-          ctx.restore();
-        } else {
-          drawBubbleShape();
-          ctx.filter = edgeBlur > 0.06 ? `blur(${edgeBlur}px)` : "none";
-          ctx.fill();
-          ctx.filter = "none";
-        }
-        ctx.shadowColor = "transparent";
-        if (m > 0.3) {
-          ctx.globalAlpha = ((m - 0.3) / 0.7) * (this.side === "left" ? 0.55 : 0.5);
-          ctx.fillStyle = "#FFFFFF";
-          ctx.beginPath();
-          ctx.ellipse(-sw * 0.23, -sh * 0.31, sw * 0.085, sh * 0.13, 0.48, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.shadowColor = "transparent";
+          if (m > 0.3) {
+            ctx.globalAlpha = pillA * (isRight ? 0.5 : 0.55);
+            ctx.fillStyle = "#FFFFFF";
+            ctx.beginPath();
+            ctx.ellipse(-sw * 0.23, -sh * 0.31, sw * 0.085, sh * 0.13, 0.48, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+          if (!this.charsOut) {
+            if (this.showTyping) drawTypingDots(t, isRight ? "rgba(255,255,255,0.85)" : "rgba(120,120,120,0.85)");
+            else if (this.showText) {
+              ctx.fillStyle = this.textColor;
+              ctx.font = `300 ${this.fontSize}px ${FONT_UI}`;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.fillText(this.textReveal < 1 ? this.text.slice(0, Math.ceil(this.text.length * this.textReveal)) : this.text, 0, 0);
+            }
+          }
           ctx.globalAlpha = 1;
         }
-        if (m > 0.55) {
-          ctx.globalAlpha = (m - 0.55) / 0.45;
-          ctx.fillStyle = this.side === "right" ? KLEIN_DEEP : "#F0E0DE";
-          ctx.beginPath();
-          const ny = sh / 2;
-          ctx.moveTo(-3.5, ny - 1);
-          ctx.lineTo(3.5, ny - 1);
-          ctx.lineTo(2.2, ny + 4.5);
-          ctx.lineTo(-2.2, ny + 4.5);
-          ctx.closePath();
-          ctx.fill();
-          ctx.globalAlpha = 1;
-        }
-        if (m > 0.25) {
-          const sa = (m - 0.25) / 0.75;
-          const len = (108 + this.idx * 6) * sa;
-          const sw1 = Math.sin(this.swayPhase * 1.4) * 9;
-          const sw2 = Math.sin(this.swayPhase * 1.4 + 1) * 7;
-          ctx.strokeStyle = this.side === "left" ? "rgba(120,120,120,0.7)" : "rgba(0,20,168,0.85)";
-          ctx.lineWidth = 0.9;
-          ctx.beginPath();
-          ctx.moveTo(0, sh / 2 + 4);
-          ctx.bezierCurveTo(sw2 * 0.5, sh / 2 + 4 + len * 0.35, sw1 * 0.7, sh / 2 + 4 + len * 0.7, sw1, sh / 2 + 4 + len);
-          ctx.stroke();
-        }
-        if (!this.charsOut) {
-          if (this.showTyping) drawTypingDots(t, this.side === "left" ? "rgba(120,120,120,0.85)" : "rgba(255,255,255,0.85)");
-          else if (this.showText) {
-            ctx.fillStyle = this.textColor;
-            ctx.font = `300 ${this.fontSize}px ${FONT_UI}`;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(this.textReveal < 1 ? this.text.slice(0, Math.ceil(this.text.length * this.textReveal)) : this.text, 0, 0);
+        // ── 2) 爱心（右）/ 玻璃水泡（左）弹入飘升 ──
+        if (popIn > 0.01) {
+          ctx.globalAlpha = popIn;
+          if (isRight) {
+            const g = ctx.createLinearGradient(0, -hh / 2, 0, hh / 2);
+            g.addColorStop(0, "#F3C9C6");
+            g.addColorStop(0.5, "#D8A2A0");
+            g.addColorStop(1, "#A96F6B");
+            ctx.fillStyle = g;
+            drawHeartPath(ctx, 0, 0, hw, hh);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(169,111,107,0.45)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = "rgba(255,255,255,0.4)";
+            ctx.beginPath();
+            ctx.ellipse(-hw * 0.2, -hh * 0.26, hw * 0.1, hh * 0.13, 0.5, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            ctx.fillStyle = "rgba(255,255,255,0.15)";
+            ctx.beginPath();
+            ctx.ellipse(0, 0, hw / 2, hh / 2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255,255,255,0.65)";
+            ctx.lineWidth = 1.1;
+            ctx.stroke();
+            ctx.strokeStyle = "rgba(216,162,160,0.35)";
+            ctx.lineWidth = 0.8;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, hw / 2 - 1.4, hh / 2 - 1.4, 0, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.strokeStyle = "rgba(255,255,255,0.75)";
+            ctx.lineWidth = hh * 0.07;
+            ctx.beginPath();
+            ctx.ellipse(-hw * 0.2, -hh * 0.22, hw * 0.22, hh * 0.2, -0.5, Math.PI * 1.15, Math.PI * 1.75);
+            ctx.stroke();
           }
+          // 小尾巴 + 细线（弹入后短暂出现，飘升后消失）
+          const tailA = clamp((popIn - 0.05) / 0.3, 0, 1) * (1 - clamp((m - 0.8) / 0.2, 0, 1));
+          if (tailA > 0.02) {
+            ctx.globalAlpha = popIn * tailA;
+            const ny = isRight ? hh * 0.42 + 3 : hh * 0.52;
+            ctx.fillStyle = isRight ? KLEIN_DEEP : "rgba(216,162,160,0.5)";
+            ctx.beginPath();
+            ctx.moveTo(-3.2, ny - 1);
+            ctx.lineTo(3.2, ny - 1);
+            ctx.lineTo(2, ny + 4);
+            ctx.lineTo(-2, ny + 4);
+            ctx.closePath();
+            ctx.fill();
+            const len = (60 + this.idx * 6) * tailA;
+            const sw1 = Math.sin(this.swayPhase * 1.4) * 8;
+            const sw2 = Math.sin(this.swayPhase * 1.4 + 1) * 6;
+            ctx.strokeStyle = isRight ? "rgba(169,111,107,0.55)" : "rgba(216,162,160,0.4)";
+            ctx.lineWidth = 0.9;
+            ctx.beginPath();
+            ctx.moveTo(0, ny + 4);
+            ctx.bezierCurveTo(sw2 * 0.5, ny + 4 + len * 0.35, sw1 * 0.7, ny + 4 + len * 0.7, sw1, ny + 4 + len);
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
         }
         ctx.restore();
       }
@@ -427,12 +462,27 @@ export function SplashAnimation() {
         ctx.font = `italic 400 ${this.fontSize}px ${FONT_SERIF}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillStyle = "rgba(216,162,160,0.09)";
-        for (const [dx, dy] of [[-1.6, 0], [1.6, 0], [0, -1.6], [0, 1.6], [-1.1, -1.1], [1.1, 1.1], [-1.1, 1.1], [1.1, -1.1]]) {
+        // 柔和立体描边
+        ctx.fillStyle = "rgba(169,111,107,0.14)";
+        for (const [dx, dy] of [[-1.7, 0], [1.7, 0], [0, -1.7], [0, 1.7], [-1.2, -1.2], [1.2, 1.2], [-1.2, 1.2], [1.2, -1.2]]) {
           ctx.fillText(this.ch, dx, dy);
         }
-        ctx.fillStyle = "rgba(216,162,160,0.42)";
+        // 玫瑰金渐变主体
+        const g = ctx.createLinearGradient(0, -this.fontSize * 0.55, 0, this.fontSize * 0.55);
+        g.addColorStop(0, "#F6DFDC");
+        g.addColorStop(0.5, "#D8A2A0");
+        g.addColorStop(1, "#A96F6B");
+        ctx.fillStyle = g;
         ctx.fillText(this.ch, 0, 0);
+        // 顶部镜面高光
+        ctx.globalAlpha = this.opacity * 0.45;
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillText(this.ch, 0, -this.fontSize * 0.045);
+        // 右上玻璃反光点
+        ctx.globalAlpha = this.opacity * 0.6;
+        ctx.beginPath();
+        ctx.arc(this.fontSize * 0.32, -this.fontSize * 0.34, this.fontSize * 0.05, 0, Math.PI * 2);
+        ctx.fill();
         ctx.restore();
       }
     }
