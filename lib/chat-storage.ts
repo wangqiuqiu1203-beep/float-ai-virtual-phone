@@ -49,6 +49,7 @@ export type ChatSession = {
     collapseBilingualTranslation?: boolean;
     bilingualTranslationPrompt?: string;
     offlineBilingualTranslationPrompt?: string;
+    dialectMode?: boolean; // 粤语翻译模式：角色用粤语回复并附普通话译文
     nativeExpandedToolSourceIds?: string[];
     visionImagePromptLimit?: number;
     // Group chat fields

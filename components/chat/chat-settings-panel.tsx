@@ -36,7 +36,7 @@ import { clearChatOfflineTurns } from "@/lib/chat-offline-storage";
 import { triggerDeleteFriendReaction } from "@/lib/friend-request-engine";
 import { loadCharacters } from "@/lib/character-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
-import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Trash2, type LucideIcon } from "lucide-react";
+import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Trash2, Languages, type LucideIcon } from "lucide-react";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -168,6 +168,7 @@ export function ChatSettingsPanel({
     const [visionImagePromptLimit, setVisionImagePromptLimit] = useState(() => normalizeVisionImagePromptLimit(session.visionImagePromptLimit));
     const [bilingualTranslationEnabled, setBilingualTranslationEnabled] = useState(session.bilingualTranslationEnabled !== false);
     const [collapseBilingualTranslation, setCollapseBilingualTranslation] = useState(session.collapseBilingualTranslation !== false);
+    const [dialectMode, setDialectMode] = useState(session.dialectMode === true);
     const defaultBilingualPrompt = session.isGroup ? DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT : DEFAULT_CHAT_BILINGUAL_PROMPT;
     const defaultOfflineBilingualPrompt = session.isGroup ? DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT : DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT;
     const [bilingualTranslationPrompt, setBilingualTranslationPrompt] = useState(session.bilingualTranslationPrompt || defaultBilingualPrompt);
@@ -743,6 +744,36 @@ export function ChatSettingsPanel({
                         </div>
                         {bilingualTranslationEnabled && (
                             <>
+                                <div className="menu-item">
+                                    <ChatInfoIcon icon={Languages} color={BINDING_ACCENTS.memory} />
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">角色输出语言</span>
+                                        <span className="menu-desc">粤语模式：角色说粤语，每句附普通话翻译</span>
+                                    </div>
+                                    <div className="menu-right flex items-center gap-1.5 shrink-0">
+                                        <button
+                                            type="button"
+                                            className={`ui-btn h-7 px-2.5 text-xs ${dialectMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
+                                            onClick={() => {
+                                                setDialectMode(true);
+                                                setBilingualTranslationEnabled(true);
+                                                updateSession({ dialectMode: true, bilingualTranslationEnabled: true });
+                                            }}
+                                        >
+                                            粤语
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className={`ui-btn h-7 px-2.5 text-xs ${!dialectMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
+                                            onClick={() => {
+                                                setDialectMode(false);
+                                                updateSession({ dialectMode: false });
+                                            }}
+                                        >
+                                            原语言
+                                        </button>
+                                    </div>
+                                </div>
                                 <div className="menu-item">
                                     <ChatInfoIcon icon={MessageSquare} color={BINDING_ACCENTS.voice} />
                                     <div className="menu-label-group">

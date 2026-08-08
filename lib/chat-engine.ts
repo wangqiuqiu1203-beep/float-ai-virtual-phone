@@ -66,11 +66,12 @@ import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
 import { isMediaStoreRef, loadMediaBlob } from "./media-cache-storage";
 import {
-    DEFAULT_CHAT_BILINGUAL_PROMPT,
-    DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT,
-    DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT,
-    DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
-    resolveBilingualPrompt,
+  DEFAULT_CHAT_BILINGUAL_PROMPT,
+  DEFAULT_DIALECT_CANTONESE_PROMPT,
+  DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT,
+  DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT,
+  DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
+  resolveBilingualPrompt,
 } from "./bilingual-prompt-defaults";
 import { parseOfflineResponse, type ParsedOfflineResponse } from "./chat-offline-storage";
 import { throwIfAborted } from "./abort-utils";
@@ -1772,8 +1773,10 @@ export async function buildChatPromptMessages(
     const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt();
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
     const chatBilingualInstruction = !session.isGroup
-        ? buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
-        : "";
+  ? session.dialectMode
+    ? buildChatBilingualInstruction(true, "single", session.bilingualTranslationPrompt && session.bilingualTranslationPrompt !== DEFAULT_CHAT_BILINGUAL_PROMPT ? session.bilingualTranslationPrompt : DEFAULT_DIALECT_CANTONESE_PROMPT)
+    : buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
+  : "";
     const offlineBilingualInstruction = !session.isGroup
         ? buildOfflineBilingualInstruction(
             session.bilingualTranslationEnabled !== false,

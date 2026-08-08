@@ -41,7 +41,7 @@ import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
 import { scheduleFollowUp, cancelFollowUp } from "@/lib/follow-up-service";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, Clapperboard, Gift, Loader2, MoreHorizontal, X } from "lucide-react";
+import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, Clapperboard, Gift, Loader2, MoreHorizontal, X, Languages } from "lucide-react";
 import { setDebugChatState } from "@/lib/debug-store";
 import { scopeSessionCSS } from "@/lib/css-scoper";
 import { setChatActive } from "@/lib/music-action-queue";
@@ -985,6 +985,9 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     const [isGenerating, setIsGenerating] = useState(false);
     const [offlineMode, setOfflineMode] = useState(false);
     const [theaterMode, setTheaterMode] = useState(() => kvGet(CHAT_THEATER_MODE_PREFIX + session.id) === "1");
+    const [showTranslationQuick, setShowTranslationQuick] = useState(false);
+    const [quickDialect, setQuickDialect] = useState(session.dialectMode === true);
+    const [quickShowTranslation, setQuickShowTranslation] = useState(session.collapseBilingualTranslation !== true);
     const [offlineTurns, setOfflineTurns] = useState<ChatOfflineTurn[]>([]);
     const [offlineVisibleCount, setOfflineVisibleCount] = useState(OFFLINE_INITIAL_LOAD);
     const [pendingOfflineUserText, setPendingOfflineUserText] = useState("");
@@ -4745,11 +4748,95 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             </span>
                         )}
                     </span>
-                    <span className="page-header-right">
-                        <button className="page-back-btn" type="button" onClick={() => setShowSettings(true)} aria-label="更多">
-                            <MoreHorizontal size={22} strokeWidth={1.5} />
-                        </button>
-                    </span>
+<span className="page-header-right">
+                                <span className="relative" style={{ position: "relative" }}>
+                                    <button
+                                        className="page-back-btn"
+                                        type="button"
+                                        onClick={() => setShowTranslationQuick(v => !v)}
+                                        aria-label="翻译快捷开关"
+                                        title="翻译快捷开关"
+                                        style={quickDialect ? { color: "var(--c-icon-active)" } : undefined}
+                                    >
+                                        <Languages size={21} strokeWidth={1.6} />
+                                        {quickDialect && <span className="chat-translation-quick-dot" />}
+                                    </button>
+                                    {showTranslationQuick && (
+                                        <>
+                                            <div
+                                                className="fixed inset-0"
+                                                style={{ zIndex: 70 }}
+                                                onClick={() => setShowTranslationQuick(false)}
+                                            />
+                                            <div
+                                                className="chat-translation-quick-pop"
+                                                style={{
+                                                    position: "absolute",
+                                                    top: 46,
+                                                    right: -6,
+                                                    zIndex: 80,
+                                                    width: 228,
+                                                    background: "var(--c-panel)",
+                                                    border: "1px solid var(--c-panel-border)",
+                                                    borderRadius: 14,
+                                                    boxShadow: "0 12px 32px rgba(74,49,46,0.16)",
+                                                    padding: "12px 14px",
+                                                }}
+                                            >
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <div className="text-[13px] font-medium" style={{ color: "var(--c-text-title)" }}>粤语翻译</div>
+                                                        <div className="text-[11px] truncate" style={{ color: "var(--c-text)" }}>角色说粤语，附普通话译文</div>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        className="chat-translation-quick-switch"
+                                                        data-on={quickDialect ? "" : undefined}
+                                                        onClick={() => {
+                                                            const next = !quickDialect;
+                                                            setQuickDialect(next);
+                                                            Object.assign(session, { dialectMode: next, bilingualTranslationEnabled: true });
+                                                            saveChatSessions(loadChatSessions().map(s => s.id === session.id ? session : s));
+                                                        }}
+                                                    >
+                                                        <span />
+                                                    </button>
+                                                </div>
+                                                <div className="flex items-center justify-between gap-3 mt-2.5">
+                                                    <div className="min-w-0">
+                                                        <div className="text-[13px] font-medium" style={{ color: "var(--c-text-title)" }}>显示译文</div>
+                                                        <div className="text-[11px] truncate" style={{ color: "var(--c-text)" }}>默认直接展开中文翻译</div>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        className="chat-translation-quick-switch"
+                                                        data-on={quickShowTranslation ? "" : undefined}
+                                                        onClick={() => {
+                                                            const next = !quickShowTranslation;
+                                                            setQuickShowTranslation(next);
+                                                            Object.assign(session, { collapseBilingualTranslation: !next });
+                                                            saveChatSessions(loadChatSessions().map(s => s.id === session.id ? session : s));
+                                                        }}
+                                                    >
+                                                        <span />
+                                                    </button>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="mt-3 w-full text-[12px] py-1.5 rounded-lg"
+                                                    style={{ color: "var(--c-icon-active)", background: "color-mix(in srgb, var(--c-icon-active) 10%, transparent)" }}
+                                                    onClick={() => { setShowTranslationQuick(false); setShowSettings(true); }}
+                                                >
+                                                    更多翻译设置
+                                                </button>
+                                            </div>
+                                        </>
+                                    )}
+                                </span>
+                                <button className="page-back-btn" type="button" onClick={() => setShowSettings(true)} aria-label="更多">
+                                    <MoreHorizontal size={22} strokeWidth={1.5} />
+                                </button>
+                            </span>
                 </div>
             </header>
 
