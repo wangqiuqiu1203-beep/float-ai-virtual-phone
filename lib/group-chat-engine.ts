@@ -35,6 +35,12 @@ import { isNeteaseConfigured } from "./music-service";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 import {
+    DEFAULT_UNIVERSAL_TRANSLATION_GROUP_PROMPT,
+    DEFAULT_UNIVERSAL_TRANSLATION_GROUP_OFFLINE_PROMPT,
+    DEFAULT_DIALECT_CANTONESE_GROUP_PROMPT,
+    DEFAULT_DIALECT_CANTONESE_GROUP_OFFLINE_PROMPT,
+} from "./bilingual-prompt-defaults";
+import {
     resolveBinding,
     loadBindingConfig,
     loadApiConfigs,
@@ -417,16 +423,24 @@ async function buildGroupChatPromptMessages(
     const groupToolsPrompt = usesNativeActions
         ? `需要动作时使用可用动作接口，并填写执行成员 actorName。可选成员：${memberNames.join("、")}`
         : formatGroupToolsForPrompt(enabledTools);
-    const chatBilingualInstruction = buildChatBilingualInstruction(
-        session.bilingualTranslationEnabled !== false,
-        "group",
-        session.bilingualTranslationPrompt,
-    );
-    const offlineBilingualInstruction = buildOfflineBilingualInstruction(
-        session.bilingualTranslationEnabled !== false,
-        "group",
-        session.offlineBilingualTranslationPrompt,
-    );
+    const chatBilingualInstruction = session.universalTranslationMode
+    ? buildChatBilingualInstruction(true, "group", DEFAULT_UNIVERSAL_TRANSLATION_GROUP_PROMPT)
+    : session.dialectMode
+        ? buildChatBilingualInstruction(true, "group", DEFAULT_DIALECT_CANTONESE_GROUP_PROMPT)
+        : buildChatBilingualInstruction(
+            session.bilingualTranslationEnabled !== false,
+            "group",
+            session.bilingualTranslationPrompt,
+        );
+const offlineBilingualInstruction = session.universalTranslationMode
+    ? buildOfflineBilingualInstruction(true, "group", DEFAULT_UNIVERSAL_TRANSLATION_GROUP_OFFLINE_PROMPT)
+    : session.dialectMode
+        ? buildOfflineBilingualInstruction(true, "group", DEFAULT_DIALECT_CANTONESE_GROUP_OFFLINE_PROMPT)
+        : buildOfflineBilingualInstruction(
+            session.bilingualTranslationEnabled !== false,
+            "group",
+            session.offlineBilingualTranslationPrompt,
+        );
     const groupRoster = buildGroupRosterMacro(
         session,
         members.map(m => ({ id: m.character.id, name: m.character.name })),
