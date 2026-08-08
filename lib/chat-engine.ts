@@ -1701,10 +1701,22 @@ export async function buildChatPromptMessages(
 
     const allWorldBooks = loadWorldBooks();
     const extraWorldBookIds = options?.extraWorldBookIds ?? [];
-    const worldBookIds = [...new Set([...(activeSlot.worldBookIds || []), ...extraWorldBookIds])];
-    const worldBooks = promptProfile?.enableWorldBooks === false
+    // 聊天级世界书覆盖：开启后仅使用本聊天勾选的书（替代角色绑定+全局）
+    const worldBookIds = session.worldBookOverride === true
+        ? [...new Set([...(session.worldBookIds ?? []), ...extraWorldBookIds])]
+        : [...new Set([...(activeSlot.worldBookIds || []), ...extraWorldBookIds])];
+    let worldBooks = (promptProfile?.enableWorldBooks === false
         ? []
-        : worldBookIds.map(id => allWorldBooks.find(w => w.id === id)).filter(Boolean) as typeof allWorldBooks;
+        : worldBookIds.map(id => allWorldBooks.find(w => w.id === id)).filter(Boolean)) as typeof allWorldBooks;
+    // 聊天级禁用条目：展开书后单独关掉的条目不注入
+    const disabledEntries = session.worldBookDisabledEntries;
+    if (disabledEntries && Object.keys(disabledEntries).length > 0) {
+        worldBooks = worldBooks.map(wb => {
+            const disabled = disabledEntries[wb.id];
+            if (!disabled || disabled.length === 0) return wb;
+            return { ...wb, entries: wb.entries.filter(e => !disabled.includes(e.uid)) };
+        });
+    }
 
     const allRegexes = loadRegexes();
     const regexes = promptProfile?.enableRegexes === false

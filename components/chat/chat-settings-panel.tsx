@@ -35,8 +35,10 @@ import {
 import { clearChatOfflineTurns } from "@/lib/chat-offline-storage";
 import { triggerDeleteFriendReaction } from "@/lib/friend-request-engine";
 import { loadCharacters } from "@/lib/character-storage";
+import { loadWorldBooks, resolveBinding, loadBindingConfig } from "@/lib/settings-storage";
+import type { WorldBookConfig, BindingSlot } from "@/lib/settings-types";
 import { resolveUserIdentity } from "@/lib/settings-storage";
-import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Trash2, Languages, type LucideIcon } from "lucide-react";
+import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, MessageSquare, Search, AlertCircle, Code, Trash2, Languages, Globe, type LucideIcon } from "lucide-react";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -197,6 +199,32 @@ export function ChatSettingsPanel({
     const [searchResults, setSearchResults] = useState<ChatMessage[]>([]);
     const [isSearching, setIsSearching] = useState(false);
     const searchRunRef = useRef(0);
+    // ──聊天级世界书（为此聊天单独自定义）──
+    const [showWorldBookPanel, setShowWorldBookPanel] = useState(false);
+    const [worldBookOverride, setWorldBookOverride] = useState(session.worldBookOverride === true);
+    const [worldBookIds, setWorldBookIds] = useState<string[]>(session.worldBookIds ?? []);
+    const [worldBookDisabled, setWorldBookDisabled] = useState<Record<string, string[]>>(session.worldBookDisabledEntries ?? {});
+    const [wbSearchQuery, setWbSearchQuery] = useState("");
+    const [expandedWbId, setExpandedWbId] = useState<string | null>(null);
+    const toggleWorldBook = (id: string, on: boolean) => {
+        const next = on
+            ? [...new Set([...worldBookIds, id])]
+            : worldBookIds.filter(x => x !== id);
+        setWorldBookIds(next);
+        updateSession({ worldBookIds: next });
+    };
+    const toggleWorldBookEntry = (bookId: string, entryUid: string, enabled: boolean) => {
+        const next: Record<string, string[]> = { ...worldBookDisabled };
+        const list = [...(next[bookId] ?? [])];
+        if (enabled) {
+            next[bookId] = list.filter(uid => uid !== entryUid);
+        } else {
+            next[bookId] = [...list, entryUid];
+        }
+        if (next[bookId].length === 0) delete next[bookId];
+        setWorldBookDisabled(next);
+        updateSession({ worldBookDisabledEntries: next });
+    };
 
     const loadSearchHistoryWindow = (count = CHAT_INITIAL_VISIBLE_MESSAGE_COUNT) => {
         const visibleMessages = loadChatMessages(session.id).filter(isSearchVisibleMessage);
@@ -284,6 +312,12 @@ export function ChatSettingsPanel({
 
     const characters = loadCharacters();
     const character = characters.find(c => c.id === session.contactId);
+    const allWorldBooks: WorldBookConfig[] = loadWorldBooks();
+    const bindings = loadBindingConfig();
+    const boundSlot: BindingSlot = character ? resolveBinding(bindings, character.id, "chat") : resolveBinding(bindings);
+    const boundBookNames = (boundSlot.worldBookIds || [])
+        .map(id => allWorldBooks.find(w => w.id === id)?.name)
+        .filter((n): n is string => Boolean(n));
 
     const characterName = session.isGroup
         ? (groupName || session.groupName || "群聊")
@@ -603,6 +637,20 @@ export function ChatSettingsPanel({
                     <button className="menu-item" onClick={openSearchPanel}>
                         <ChatInfoIcon icon={Search} color={BINDING_ACCENTS.api} />
                         <div className="menu-label-group"><span className="menu-label">查找聊天记录</span></div>
+                        <div className="menu-right"><ChevronRight size={16} /></div>
+                    </button>
+                    <button className="menu-item" onClick={() => setShowWorldBookPanel(true)}>
+                        <ChatInfoIcon icon={Globe} color={BINDING_ACCENTS.worldBook} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">世界书</span>
+                            <span className="menu-desc">
+                                {worldBookOverride
+                                    ? `已自定义 ${worldBookIds.length} 本（${worldBookIds.length > 0 ? worldBookIds.length : 0} 本生效）`
+                                    : boundBookNames.length > 0
+                                        ? `跟随角色绑定：${boundBookNames.slice(0, 2).join("、")}${boundBookNames.length > 2 ? " 等" : ""}`
+                                        : "跟随角色绑定与全局"}
+                            </span>
+                        </div>
                         <div className="menu-right"><ChevronRight size={16} /></div>
                     </button>
                 </div>
@@ -1259,6 +1307,125 @@ export function ChatSettingsPanel({
                         </div>
                     </PageShell>
                 </div>
+                </div>
+            )}
+            {/* Sub-page: WorldBook（为此聊天单独自定义） */}
+            {showWorldBookPanel && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 9999, background: "#ffffff" }}>
+                    <div style={{ position: "absolute", inset: 0, background: "var(--c-page-body-bg)" }}>
+                        <PageShell title="世界书" onBack={() => setShowWorldBookPanel(false)}>
+                            <div className="flex flex-col gap-1 px-4 pt-2 pb-4">
+                                {/* 开关 */}
+                                <div className="menu-item">
+                                    <ChatInfoIcon icon={Globe} color={BINDING_ACCENTS.worldBook} />
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">为此聊天单独自定义</span>
+                                        <span className="menu-desc">
+                                            {worldBookOverride ? "已开启：本聊天只使用下方勾选的书" : "关闭：跟随角色绑定的世界书与全局"}
+                                        </span>
+                                    </div>
+                                    <div className="menu-right">
+                                        <Toggle
+                                            checked={worldBookOverride}
+                                            onChange={c => {
+                                                setWorldBookOverride(c);
+                                                updateSession({ worldBookOverride: c });
+                                            }}
+                                        />
+                                    </div>
+                                </div>
+                                <p className="menu-desc text-xs leading-relaxed px-1 py-2" style={{ color: "var(--c-icon)" }}>
+                                    勾选的书才在这个聊天生效；展开书可单独关掉个别条目。仅影响你与此角色的聊天。
+                                    关闭时默认跟随角色绑定的世界书与全局世界书，并随其改动即时同步；开启后才需要逐本/逐条目自行勾选。
+                                </p>
+                                {worldBookOverride && (
+                                    <>
+                                        <div className="flex items-center gap-2 py-1">
+                                            <input
+                                                type="text"
+                                                placeholder="搜索世界书..."
+                                                value={wbSearchQuery}
+                                                onChange={e => setWbSearchQuery(e.target.value)}
+                                                className="ui-input flex-1 min-w-0"
+                                            />
+                                        </div>
+                                        <div className="flex flex-col mt-1">
+                                            {allWorldBooks.length === 0 && (
+                                                <div className="ui-empty">
+                                                    <span className="menu-desc">暂无世界书，去设置 → 世界书 导入</span>
+                                                </div>
+                                            )}
+                                            {allWorldBooks
+                                                .filter(b => b.name.toLowerCase().includes(wbSearchQuery.trim().toLowerCase()))
+                                                .map(book => {
+                                                    const checked = worldBookIds.includes(book.id);
+                                                    const disabled = worldBookDisabled[book.id] ?? [];
+                                                    const expanded = expandedWbId === book.id;
+                                                    const activeEntryCount = book.entries.length - disabled.length;
+                                                    return (
+                                                        <div key={book.id} className="menu-item" style={{ alignItems: "flex-start", padding: 0, flexDirection: "column" }}>
+                                                            <div className="flex items-center w-full px-4 py-2.5">
+                                                                <label
+                                                                    className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                                                                    onClick={e => e.stopPropagation()}
+                                                                >
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={checked}
+                                                                        onChange={e => toggleWorldBook(book.id, e.target.checked)}
+                                                                        className="w-4 h-4 shrink-0"
+                                                                    />
+                                                                    <span className="menu-label truncate" style={{ color: checked ? "var(--c-text-title)" : "var(--c-text)" }}>{book.name}</span>
+                                                                </label>
+                                                                <span className="menu-desc shrink-0 mr-1">
+                                                                    {checked
+                                                                        ? `${activeEntryCount}/${book.entries.length} 条目生效`
+                                                                        : `${book.entries.length} 个条目`}
+                                                                </span>
+                                                                <button
+                                                                    type="button"
+                                                                    aria-label="展开条目"
+                                                                    className="grid place-items-center w-7 h-7 shrink-0 border-0 bg-transparent text-[var(--c-icon)]"
+                                                                    onClick={() => setExpandedWbId(expanded ? null : book.id)}
+                                                                >
+                                                                    <ChevronRight size={16} className={expanded ? "rotate-90 transition-transform" : "transition-transform"} />
+                                                                </button>
+                                                            </div>
+                                                            {expanded && (
+                                                                <div className="w-full flex flex-col pb-1">
+                                                                    {book.entries.length === 0 && (
+                                                                        <span className="menu-desc px-4 py-1">这本书没有条目</span>
+                                                                    )}
+                                                                    {book.entries.map(entry => {
+                                                                        const entryOff = disabled.includes(entry.uid);
+                                                                        return (
+                                                                            <div key={entry.uid} className="flex items-center gap-2 pl-9 pr-4 py-1.5">
+                                                                                <div className="flex-1 min-w-0">
+                                                                                    <div className="menu-label truncate" style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: entryOff ? "var(--c-icon)" : "var(--c-text-title)" }}>
+                                                                                        {entry.key || entry.comment || "（无触发词）"}
+                                                                                    </div>
+                                                                                    <div className="menu-desc truncate">
+                                                                                        {entry.content.slice(0, 40)}{entry.content.length > 40 ? "…" : ""}
+                                                                                    </div>
+                                                                                </div>
+                                                                                <Toggle
+                                                                                    checked={!entryOff}
+                                                                                    onChange={c => toggleWorldBookEntry(book.id, entry.uid, c)}
+                                                                                />
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        </PageShell>
+                    </div>
                 </div>
             )}
         </PageShell>
