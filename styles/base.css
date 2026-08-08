@@ -70,7 +70,7 @@ a {
 
 .splash-phone-screen {
   padding: 0;
-  background: #F1F2F6;
+  background: #FAF4F0;
 }
 
 .splash-phone-screen::before {
@@ -127,7 +127,7 @@ a {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  background: #F1F2F6;
+  background: #FAF4F0;
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
 }

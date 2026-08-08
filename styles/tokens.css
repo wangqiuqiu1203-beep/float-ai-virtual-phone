@@ -4,38 +4,38 @@
      All colors user-editable via theme panel
      ═══════════════════════════════════════════ */
 
-  /* ── 核心 16 色 ── */
-  --c-header-bg: #FFFFFF;
+  /* ── 核心 16 色 (玫瑰金 · 米白体系) ── */
+  --c-header-bg: #FDF9F6;
   /* 标题栏底色 */
-  --c-page-body-bg: #F1F2F6;
-  /* 页面内容区底色 */
-  --c-card: rgba(255, 255, 255, 0.7);
+  --c-page-body-bg: #FAF4F0;
+  /* 页面内容区底色 (米白纸色) */
+  --c-card: rgba(255, 255, 255, 0.72);
   /* 选项卡片底色 */
-  --c-card-border: #E0E0E0;
+  --c-card-border: #EAD9D5;
   /* 选项卡片边框 */
-  --c-polaroid: #FEFEFE;
+  --c-polaroid: #FFFDFB;
   /* 拍立得正面 */
-  --c-polaroid-back: #F0F0F0;
+  --c-polaroid-back: #F3E7E4;
   /* 拍立得背面 */
-  --c-panel: #FFFFFF;
+  --c-panel: #FFFEFD;
   /* 操作面板底色 */
-  --c-panel-border: #D9DADB;
+  --c-panel-border: #E7D6D2;
   /* 操作面板边框 */
-  --c-text-title: #2C3440;
-  /* 强调文字 */
-  --c-text: #797E85;
-  /* 普通文字 */
-  --c-icon-active: #4A4A4A;
-  /* 强调图标/品牌色 */
-  --c-icon: #A0A3A8;
+  --c-text-title: #4A312E;
+  /* 强调文字 (深棕红) */
+  --c-text: #8C706B;
+  /* 普通文字 (暖灰棕) */
+  --c-icon-active: #A96F6B;
+  /* 强调图标/品牌色 (玫瑰金深) */
+  --c-icon: #B99A96;
   /* 普通图标/占位符 */
-  --c-input: #F2F3F5;
+  --c-input: #F7EDEA;
   /* 输入框底色 */
-  --c-input-border: rgba(224, 226, 229, 0);
+  --c-input-border: rgba(216, 162, 160, 0.28);
   /* 输入框边框 */
-  --c-bubble-self: #95EC69;
-  /* 己方气泡 */
-  --c-bubble-other: #FFFFFF;
+  --c-bubble-self: #D8A2A0;
+  /* 己方气泡 (玫瑰金) */
+  --c-bubble-other: #FFFDFC;
   /* 对方气泡 */
 
   /* ── 功能色 3 ── */
@@ -54,7 +54,7 @@
 
   /* ── 桌面系统图标专属配色（实心） ── */
   --c-desktop-icon: #ffffff;
-  --c-desktop-icon-bg: #c7b8ff;
+  --c-desktop-icon-bg: #D8A2A0;
   --c-desktop-icon-box: rgba(255, 255, 255, 0.01);
 
   /* ── 图标色板 9（全部 flat hex） ── */

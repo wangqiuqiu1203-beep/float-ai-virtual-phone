@@ -39,13 +39,13 @@ function buildColor(hex: string, alpha: number): string {
 const DEFAULT_COLOR_VALUES: Record<string, string> = {
   "--c-desktop-icon-box": "rgba(255, 255, 255, 0.01)",
   "--c-desktop-icon": "#ffffff",
-  "--c-desktop-icon-bg": "#c7b8ff",
-  "--c-home-label": "#4A4A4A",
-  "--c-home-text": "rgba(0, 0, 0, 0.65)",
-  "--c-home-sub": "rgba(0, 0, 0, 0.35)",
+  "--c-desktop-icon-bg": "#D8A2A0",
+  "--c-home-label": "#4A312E",
+  "--c-home-text": "rgba(74, 49, 46, 0.72)",
+  "--c-home-sub": "rgba(74, 49, 46, 0.42)",
   "--c-home-card": "rgba(255, 255, 255, 0.01)",
-  "--c-home-border": "rgba(0, 0, 0, 0.06)",
-  "--c-home-pink": "rgba(255, 160, 175, 0.5)",
+  "--c-home-border": "rgba(169, 111, 107, 0.16)",
+  "--c-home-pink": "rgba(216, 162, 160, 0.4)",
 };
 
 function ColorField({ label, colorKey, draft, onChange }: { label: string, colorKey: string, draft: ThemeProfile, onChange: (k: string, v: string) => void }) {
