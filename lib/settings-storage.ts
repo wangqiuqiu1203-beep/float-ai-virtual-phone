@@ -629,6 +629,9 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
     size: "1024x1024",
     quality: "auto",
     extraPrompt: "",
+    negativePrompt: "",
+    promptPresets: [],
+    activePromptPresetId: "",
     characterReferences: {},
     imageHosting: {
         provider: "none",

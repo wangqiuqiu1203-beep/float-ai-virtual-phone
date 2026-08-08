@@ -155,6 +155,12 @@ export type ImageHostingSettings = {
     allowMascotUpload: boolean;
 };
 
+export type ImagePromptPreset = {
+    id: string;
+    name: string;
+    positivePrompt: string;
+    negativePrompt: string;
+};
 export type ImageGenerationSettings = {
     enabled: boolean;
     requestMode: ImageGenerationRequestMode;
@@ -164,6 +170,9 @@ export type ImageGenerationSettings = {
     size: string;
     quality: string;
     extraPrompt: string;
+    negativePrompt?: string;
+    promptPresets?: ImagePromptPreset[];
+    activePromptPresetId?: string;
     characterReferences: Record<string, {
         assetId: string;
         updatedAt: number;

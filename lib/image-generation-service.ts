@@ -500,7 +500,9 @@ export async function generateImageFromConfiguredApi(params: {
     ? await normalizeReferenceImageForEdit(rawReferenceImageDataUrl)
     : null;
   throwIfAborted(params.signal);
-  const prompt = mergePrompt(description, settings.extraPrompt);
+  const merged = mergePrompt(description, settings.extraPrompt);
+  const negative = (settings.negativePrompt || "").trim();
+  const prompt = negative ? `${merged}\n\n【负面提示｜画面中禁止出现】${negative}` : merged;
 
   const data = settings.requestMode === "direct"
     ? await generateImageDirect({ settings, prompt, referenceImageDataUrl, signal: params.signal })

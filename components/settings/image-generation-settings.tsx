@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { AlertCircle, Camera, ChevronDown, Image, RefreshCw, Sparkles, Trash2, Upload } from "lucide-react";
-import type { ImageGenerationSettings as ImageGenerationSettingsType } from "@/lib/settings-types";
+import type { ImageGenerationSettings as ImageGenerationSettingsType, ImagePromptPreset as ImagePromptPresetType } from "@/lib/settings-types";
 import {
     DEFAULT_IMAGE_GENERATION_SETTINGS,
     loadImageGenerationSettings,
@@ -110,6 +110,57 @@ export function ImageGenerationSettings() {
     const updateSettings = useCallback((patch: Partial<ImageGenerationSettingsType>) => {
         persist({ ...settings, ...patch });
     }, [persist, settings]);
+    // ── 提示词预设管理 ──────────────────────────────
+    const presets: ImagePromptPresetType[] = settings.promptPresets || [];
+    const activePreset = presets.find(p => p.id === settings.activePromptPresetId) || null;
+    /** 编辑正向提示词：手动模式只改 extraPrompt；预设模式下同时自动保存到当前预设 */
+    const updateExtraPrompt = useCallback((value: string) => {
+        const nextPresets = activePreset
+            ? presets.map(p => p.id === activePreset.id ? { ...p, positivePrompt: value } : p)
+            : presets;
+        persist({ ...settings, extraPrompt: value, promptPresets: nextPresets });
+    }, [persist, settings, presets, activePreset]);
+    /** 编辑反向提示词：同上，同步到当前预设 */
+    const updateNegativePrompt = useCallback((value: string) => {
+        const nextPresets = activePreset
+            ? presets.map(p => p.id === activePreset.id ? { ...p, negativePrompt: value } : p)
+            : presets;
+        persist({ ...settings, negativePrompt: value, promptPresets: nextPresets });
+    }, [persist, settings, presets, activePreset]);
+    /** 切换预设：把预设的正向/反向提示词载入编辑框 */
+    const applyPreset = useCallback((presetId: string) => {
+        const preset = presets.find(p => p.id === presetId);
+        persist({
+            ...settings,
+            activePromptPresetId: presetId,
+            extraPrompt: preset ? preset.positivePrompt : "",
+            negativePrompt: preset ? preset.negativePrompt : "",
+        });
+    }, [persist, settings, presets]);
+    /** 新增预设：以当前编辑内容为底，命名「预设N」并激活 */
+    const addPromptPreset = useCallback(() => {
+        const preset: ImagePromptPresetType = {
+            id: `imgpreset_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            name: `预设${presets.length + 1}`,
+            positivePrompt: settings.extraPrompt,
+            negativePrompt: settings.negativePrompt || "",
+        };
+        persist({
+            ...settings,
+            promptPresets: [...presets, preset],
+            activePromptPresetId: preset.id,
+        });
+    }, [persist, settings, presets]);
+    /** 删除当前预设（回到手动模式，编辑框内容保留） */
+    const deletePromptPreset = useCallback(() => {
+        const id = settings.activePromptPresetId;
+        if (!id) return;
+        persist({
+            ...settings,
+            promptPresets: presets.filter(p => p.id !== id),
+            activePromptPresetId: "",
+        });
+    }, [persist, settings, presets]);
 
     // Changing the size also refreshes the auto-appended ratio hint in the
     // 补充提示词 box (replacing any previous hint), so models that ignore the
@@ -308,12 +359,54 @@ export function ImageGenerationSettings() {
                 </div>
 
                 <div className="flex flex-col gap-1">
-                    <label className="menu-desc ml-1">补充提示词</label>
+                    <div className="flex items-center justify-between gap-2">
+                        <label className="menu-desc ml-1">提示词预设</label>
+                        <div className="flex items-center gap-1">
+                            <Select
+                                value={settings.activePromptPresetId || ""}
+                                onChange={(event) => applyPreset(event.target.value)}
+                                className="min-w-[130px]"
+                            >
+                                <option value="">无预设（手动）</option>
+                                {presets.map(preset => (
+                                    <option key={preset.id} value={preset.id}>{preset.name}</option>
+                                ))}
+                            </Select>
+                            <button
+                                type="button"
+                                onClick={addPromptPreset}
+                                className="ui-btn ui-btn-ghost px-2 py-1 text-xs whitespace-nowrap"
+                            >
+                                ＋新增
+                            </button>
+                            <button
+                                type="button"
+                                onClick={deletePromptPreset}
+                                disabled={!settings.activePromptPresetId}
+                                className="ui-btn ui-btn-ghost px-2 py-1 text-xs whitespace-nowrap text-red-400 disabled:opacity-40"
+                            >
+                                删除当前
+                            </button>
+                        </div>
+                    </div>
+                    {activePreset && (
+                        <p className="menu-desc ml-1 opacity-80">
+                            当前预设「{activePreset.name}」——修改下方提示词会自动保存到该预设
+                        </p>
+                    )}
+                    <label className="menu-desc ml-1 mt-1">正向提示词</label>
                     <Textarea
                         value={settings.extraPrompt}
-                        onChange={(event) => updateSettings({ extraPrompt: event.target.value })}
+                        onChange={(event) => updateExtraPrompt(event.target.value)}
                         placeholder="会和角色输出的图片描述一起发送给生图模型。"
                         rows={4}
+                    />
+                    <label className="menu-desc ml-1 mt-1">反向提示词（负面词）</label>
+                    <Textarea
+                        value={settings.negativePrompt || ""}
+                        onChange={(event) => updateNegativePrompt(event.target.value)}
+                        placeholder="画面中禁止出现的内容，如：低质量、模糊、多余手指、变形…"
+                        rows={3}
                     />
                     <p className="menu-desc ml-1 opacity-70">
                         选择尺寸后会自动在末尾追加一句「{RATIO_HINT_MARKER}…」构图提示，用于纠正部分不认 size 参数的接口（如 gpt-image-2）。可手动修改或删除。
