@@ -3,10 +3,10 @@
 import { useLayoutEffect, useRef } from "react";
 
 const SCRIPT = [
-  { side: "right", text: "you ever zone out mid-toast?", start: 80, type: 0 },
-  { side: "left", text: "the bread became a small sunset.", start: 560, type: 310 },
-  { side: "right", text: "beautiful. also concerning.", start: 1540, type: 0 },
-  { side: "left", text: "let it float until it remembers.", start: 2140, type: 340 }
+  { side: "right", text: "the night folds into gold.", start: 80, type: 0 },
+  { side: "left", text: "a new page, still warm.", start: 560, type: 310 },
+  { side: "right", text: "Eos walks the horizon.", start: 1540, type: 0 },
+  { side: "left", text: "stay curious, stay golden.", start: 2140, type: 340 }
 ] as const;
 
 const T = {
@@ -17,10 +17,10 @@ const T = {
   tagline: 8520
 };
 
-const KLEIN = "#174BFF";
-const KLEIN_DEEP = "#0B2ED8";
-const PAPER = "#F1F2F6";
-const INK = "#1A1A1A";
+const KLEIN = "#C98A2D";
+const KLEIN_DEEP = "#8A5A16";
+const PAPER = "#FAF6EC";
+const INK = "#3B2E1C";
 const FONT_UI = "\"Inter\", -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", sans-serif";
 const FONT_SERIF = "\"Instrument Serif\", Georgia, \"Times New Roman\", serif";
 const FONT_MONO = "\"JetBrains Mono\", ui-monospace, monospace";
@@ -139,7 +139,7 @@ export function SplashAnimation() {
         if (this.y < -10) this.reset(false);
       }
       draw() {
-        ctx.fillStyle = this.tone ? `rgba(23,75,255,${this.alpha})` : `rgba(40,40,40,${this.alpha * 0.65})`;
+        ctx.fillStyle = this.tone ? `rgba(201,138,45,${this.alpha})` : `rgba(59,46,28,${this.alpha * 0.65})`;
         ctx.beginPath();
         ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
         ctx.fill();
@@ -296,7 +296,7 @@ export function SplashAnimation() {
         }
         if (m > 0.55) {
           ctx.globalAlpha = (m - 0.55) / 0.45;
-          ctx.fillStyle = this.side === "right" ? KLEIN_DEEP : "#E8E5DD";
+          ctx.fillStyle = this.side === "right" ? KLEIN_DEEP : "#EDE2CC";
           ctx.beginPath();
           const ny = sh / 2;
           ctx.moveTo(-3.5, ny - 1);
@@ -427,11 +427,11 @@ export function SplashAnimation() {
         ctx.font = `italic 400 ${this.fontSize}px ${FONT_SERIF}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillStyle = "rgba(23,75,255,0.09)";
+        ctx.fillStyle = "rgba(201,138,45,0.09)";
         for (const [dx, dy] of [[-1.6, 0], [1.6, 0], [0, -1.6], [0, 1.6], [-1.1, -1.1], [1.1, 1.1], [-1.1, 1.1], [1.1, -1.1]]) {
           ctx.fillText(this.ch, dx, dy);
         }
-        ctx.fillStyle = "rgba(23,75,255,0.42)";
+        ctx.fillStyle = "rgba(201,138,45,0.42)";
         ctx.fillText(this.ch, 0, 0);
         ctx.restore();
       }
@@ -451,7 +451,7 @@ export function SplashAnimation() {
       titles = [];
       titleFontSize = Math.max(54, Math.min(96, W * 0.22));
       ctx.font = `italic 400 ${titleFontSize}px ${FONT_SERIF}`;
-      const word = "float";
+      const word = "Eos";
       const widths = [...word].map((c) => ctx.measureText(c).width);
       const spacing = titleFontSize * 0.04;
       let total = widths.reduce((sum, width) => sum + width, 0) + spacing * (word.length - 1);
@@ -488,8 +488,8 @@ export function SplashAnimation() {
       ctx.fillStyle = PAPER;
       ctx.fillRect(0, 0, W, H);
       const grad = ctx.createRadialGradient(W / 2, H * 0.45, 0, W / 2, H * 0.45, Math.max(W, H) * 0.75);
-      grad.addColorStop(0, "rgba(23,75,255,0)");
-      grad.addColorStop(1, "rgba(23,75,255,0.08)");
+      grad.addColorStop(0, "rgba(201,138,45,0)");
+      grad.addColorStop(1, "rgba(201,138,45,0.08)");
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
       specks.forEach((s) => { s.update(); s.draw(); });
@@ -503,7 +503,7 @@ export function SplashAnimation() {
         const op = clamp((t - T.tagline) / 900, 0, 0.7);
         const txt = "WEIGHTLESS  ·  AI";
         const ls = 2.2;
-        ctx.fillStyle = `rgba(23,75,255,${op})`;
+        ctx.fillStyle = `rgba(201,138,45,${op})`;
         ctx.font = `300 10px ${FONT_MONO}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -562,7 +562,7 @@ export function SplashAnimation() {
     <div ref={stageRef} className="splash-animation-stage" aria-hidden>
       <canvas ref={canvasRef} className="splash-animation-canvas" />
       <div className="splash-animation-grain" />
-      <div className="splash-animation-corner">float / 0.1</div>
+      <div className="splash-animation-corner">Eos / 0.1</div>
       <div className="splash-animation-corner splash-animation-corner-right">no.001</div>
     </div>
   );
