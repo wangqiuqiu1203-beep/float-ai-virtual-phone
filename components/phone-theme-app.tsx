@@ -199,7 +199,7 @@ export function PhoneThemeApp({
   const [confirmThemeReset, setConfirmThemeReset] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const statusBarTop = Number(draft.cssOverrides["--status-bar-top"]?.replace("px", "") || "12");
-  const islandHidden = draft.cssOverrides["--status-island-visibility"] === "hidden";
+  const islandHidden = (draft.cssOverrides["--status-island-visibility"] ?? "hidden") !== "visible";
 
   const handleExportTheme = useCallback(async () => {
     setThemeTransferBusy(true);

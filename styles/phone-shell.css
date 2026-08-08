@@ -181,7 +181,8 @@
   height: 36px;
   border-radius: 20px;
   background: #0a0a0a;
-  visibility: var(--status-island-visibility, visible);
+  /* 默认隐藏灵动岛（黑色胶囊），需要时在「状态栏」弹窗里打开 */
+  visibility: var(--status-island-visibility, hidden);
 }
 
 .phone-shell-wrap[data-hide-top-bar="1"] .phone-status-bar>* {
