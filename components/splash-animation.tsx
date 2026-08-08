@@ -17,8 +17,8 @@ const T = {
   tagline: 8520
 };
 
-const KLEIN = "#C98A2D";
-const KLEIN_DEEP = "#8A5A16";
+const KLEIN = "#F5C518";
+const KLEIN_DEEP = "#C8920F";
 const PAPER = "#FAF6EC";
 const INK = "#3B2E1C";
 const FONT_UI = "\"Inter\", -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", sans-serif";
@@ -427,11 +427,11 @@ export function SplashAnimation() {
         ctx.font = `italic 400 ${this.fontSize}px ${FONT_SERIF}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillStyle = "rgba(201,138,45,0.09)";
+        ctx.fillStyle = "rgba(245,197,24,0.09)";
         for (const [dx, dy] of [[-1.6, 0], [1.6, 0], [0, -1.6], [0, 1.6], [-1.1, -1.1], [1.1, 1.1], [-1.1, 1.1], [1.1, -1.1]]) {
           ctx.fillText(this.ch, dx, dy);
         }
-        ctx.fillStyle = "rgba(201,138,45,0.42)";
+        ctx.fillStyle = "rgba(245,197,24,0.42)";
         ctx.fillText(this.ch, 0, 0);
         ctx.restore();
       }
@@ -503,7 +503,7 @@ export function SplashAnimation() {
         const op = clamp((t - T.tagline) / 900, 0, 0.7);
         const txt = "WEIGHTLESS  ·  AI";
         const ls = 2.2;
-        ctx.fillStyle = `rgba(201,138,45,${op})`;
+        ctx.fillStyle = `rgba(245,197,24,${op})`;
         ctx.font = `300 10px ${FONT_MONO}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
