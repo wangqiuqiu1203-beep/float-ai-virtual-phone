@@ -197,6 +197,63 @@ function parseSillyTavernData(data: Record<string, unknown>): CharacterImportDat
     tags: Array.isArray(data.tags) ? data.tags.map(String) : [],
   };
 }
+/** 酒馆卡整包附加内容（世界书 / 表情包），用于「导入一张卡，内容自动分发」 */
+export type TavernBundleExtra = {
+  worldBookJson: string | null;
+  emoteAssets: { name: string; dataUrl: string }[];
+};
+
+/**
+ * 从酒馆卡对象中提取附加内容：
+ * - 世界书：V2 在顶层 character_book，V3 在 data.extensions.world_book
+ * - 表情/立绘：V3 的 data.extensions.assets（type: emote / expression）
+ */
+export function extractTavernBundle(
+  obj: Record<string, unknown>
+): TavernBundleExtra | null {
+  if (!isSillyTavernCard(obj)) return null;
+  const data = extractSillyTavernData(obj);
+  const rawObj = obj as { character_book?: unknown };
+  const extensions = (data as { extensions?: Record<string, unknown> }).extensions;
+  // 世界书
+  const rawWb = rawObj.character_book ?? extensions?.world_book ?? null;
+  const worldBookJson =
+    rawWb && typeof rawWb === "object" && rawWb !== null ? JSON.stringify(rawWb) : null;
+  // 表情/立绘资源
+  const assets = Array.isArray(extensions?.assets)
+    ? (extensions.assets as { type?: string; name?: string; content?: string }[])
+    : [];
+  const emoteAssets = assets
+    .filter(
+      (a) =>
+        a &&
+        (a.type === "emote" || a.type === "expression") &&
+        typeof a.content === "string" &&
+        (a.content.startsWith("data:") ||
+          a.content.startsWith("http://") ||
+          a.content.startsWith("https://"))
+    )
+    .map((a) => ({ name: String(a.name || "表情"), dataUrl: a.content as string }));
+  return { worldBookJson, emoteAssets };
+}
+
+/** 从酒馆卡 PNG（chara 块）中提取附加内容 */
+export function extractTavernBundleFromPng(
+  buffer: ArrayBuffer
+): TavernBundleExtra | null {
+  const u8 = new Uint8Array(buffer);
+  const tavernBase64 = readPngTextChunk(u8, "chara");
+  if (!tavernBase64) return null;
+  try {
+    const obj = JSON.parse(
+      decodeURIComponent(escape(atob(tavernBase64)))
+    ) as Record<string, unknown>;
+    return extractTavernBundle(obj);
+  } catch {
+    return null;
+  }
+}
+
 export function parseCharacterFromJson(
   text: string
 ): CharacterImportData | null {

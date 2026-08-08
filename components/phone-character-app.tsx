@@ -12,8 +12,10 @@ import {
   saveCharacters,
   loadBackgroundItems,
   saveBackgroundItems,
+  extractTavernBundle,
+  extractTavernBundleFromPng,
   type CharacterImportData,
-
+  type TavernBundleExtra,
   CHAR_BLOCKED_FIELDS,
 } from "@/lib/character-storage";
 import { generateBriefPersonaText, isBriefPersonaStale } from "@/lib/brief-persona";
@@ -42,6 +44,20 @@ import { AlertCircle } from "lucide-react";
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { kvGet, kvSet } from "@/lib/kv-db";
 import { normalizeTimeZone } from "@/lib/character-time";
+import {
+  parseWorldBookFromJson,
+  loadWorldBooks,
+  saveWorldBooks,
+  loadBindingConfig,
+  getCharacterBinding,
+  setCharacterBinding,
+  saveBindingConfig,
+} from "@/lib/settings-storage";
+import {
+  createStickerPack,
+  addStickerByUrlToPack,
+  togglePackAssignment,
+} from "@/lib/custom-sticker-storage";
 
 type ViewType = "list" | "detail";
 
@@ -819,7 +835,15 @@ function CharListView({
         const c = createCharacter(data);
         c.polaroidStyle = styleIdx;
         onStartCharPlacement(c);
-        onNotice("点击画布放置角色");
+        // 酒馆卡整包：世界书 → 世界书库并绑定角色；表情/立绘 → 角色表情包
+        let bundle: TavernBundleExtra | null = null;
+        try {
+          bundle = extractTavernBundle(JSON.parse(text) as Record<string, unknown>);
+        } catch {
+          bundle = null;
+        }
+        const extras = importTavernBundle(bundle, c.id, c.name);
+        onNotice(extras.length ? `已导入角色 · ${extras.join(" · ")}，点击画布放置` : "点击画布放置角色");
       } else if (file.type === "image/png" || file.name.endsWith(".png")) {
         const buffer = await file.arrayBuffer();
         const data = parseCharacterFromPng(buffer);
@@ -836,7 +860,10 @@ function CharListView({
         const c = createCharacter({ ...data, avatar });
         c.polaroidStyle = styleIdx;
         onStartCharPlacement(c);
-        onNotice("点击画布放置角色");
+        // 酒馆卡整包：世界书/表情包自动分发
+        const bundle = extractTavernBundleFromPng(buffer);
+        const extras = importTavernBundle(bundle, c.id, c.name);
+        onNotice(extras.length ? `已导入角色 · ${extras.join(" · ")}，点击画布放置` : "点击画布放置角色");
       } else {
         onNotice("请选择 .json 或 .png 文件");
       }
@@ -847,6 +874,45 @@ function CharListView({
         onNotice("解析失败，请检查文件格式");
       }
     }
+  }
+  /** 导入酒馆卡附带内容：世界书 → 世界书库（并自动绑定到该角色）；表情/立绘 → 角色表情包 */
+  function importTavernBundle(
+    bundle: TavernBundleExtra | null,
+    characterId: string,
+    characterName: string
+  ): string[] {
+    if (!bundle) return [];
+    const notices: string[] = [];
+    if (bundle.worldBookJson) {
+      const wb = parseWorldBookFromJson(bundle.worldBookJson);
+      if (wb) {
+        if (!wb.name || wb.name.trim() === "" || wb.name === "导入的世界书") {
+          wb.name = characterName ? `${characterName}·世界书` : "导入的世界书";
+        }
+        saveWorldBooks([...loadWorldBooks(), wb]);
+        try {
+          const config = loadBindingConfig();
+          const binding = getCharacterBinding(config, characterId);
+          const defaults = {
+            ...binding.defaults,
+            worldBookIds: [...(binding.defaults.worldBookIds ?? []), wb.id],
+          };
+          saveBindingConfig(setCharacterBinding(config, { ...binding, defaults }));
+        } catch {
+          // 绑定失败不影响导入
+        }
+        notices.push(`世界书「${wb.name}」(${wb.entries.length}条，已绑定角色)`);
+      }
+    }
+    if (bundle.emoteAssets.length > 0) {
+      const pack = createStickerPack(characterName ? `${characterName}·表情` : "导入的表情");
+      for (const a of bundle.emoteAssets) {
+        addStickerByUrlToPack(pack.id, a.name, a.dataUrl);
+      }
+      togglePackAssignment(pack.id, characterId);
+      notices.push(`${bundle.emoteAssets.length}个表情`);
+    }
+    return notices;
   }
 
   function renderBgContent(item: CanvasBgItem) {
