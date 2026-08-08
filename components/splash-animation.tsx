@@ -17,10 +17,10 @@ const T = {
   tagline: 8520
 };
 
-const KLEIN = "#F5C518";
-const KLEIN_DEEP = "#C8920F";
-const PAPER = "#FAF6EC";
-const INK = "#3B2E1C";
+const KLEIN = "#D8A2A0";
+const KLEIN_DEEP = "#A96F6B";
+const PAPER = "#FAF4F0";
+const INK = "#4A312E";
 const FONT_UI = "\"Inter\", -apple-system, BlinkMacSystemFont, \"Helvetica Neue\", sans-serif";
 const FONT_SERIF = "\"Instrument Serif\", Georgia, \"Times New Roman\", serif";
 const FONT_MONO = "\"JetBrains Mono\", ui-monospace, monospace";
@@ -139,7 +139,7 @@ export function SplashAnimation() {
         if (this.y < -10) this.reset(false);
       }
       draw() {
-        ctx.fillStyle = this.tone ? `rgba(201,138,45,${this.alpha})` : `rgba(59,46,28,${this.alpha * 0.65})`;
+        ctx.fillStyle = this.tone ? `rgba(216,162,160,${this.alpha})` : `rgba(74,49,46,${this.alpha * 0.65})`;
         ctx.beginPath();
         ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
         ctx.fill();
@@ -296,7 +296,7 @@ export function SplashAnimation() {
         }
         if (m > 0.55) {
           ctx.globalAlpha = (m - 0.55) / 0.45;
-          ctx.fillStyle = this.side === "right" ? KLEIN_DEEP : "#EDE2CC";
+          ctx.fillStyle = this.side === "right" ? KLEIN_DEEP : "#F0E0DE";
           ctx.beginPath();
           const ny = sh / 2;
           ctx.moveTo(-3.5, ny - 1);
@@ -427,11 +427,11 @@ export function SplashAnimation() {
         ctx.font = `italic 400 ${this.fontSize}px ${FONT_SERIF}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillStyle = "rgba(245,197,24,0.09)";
+        ctx.fillStyle = "rgba(216,162,160,0.09)";
         for (const [dx, dy] of [[-1.6, 0], [1.6, 0], [0, -1.6], [0, 1.6], [-1.1, -1.1], [1.1, 1.1], [-1.1, 1.1], [1.1, -1.1]]) {
           ctx.fillText(this.ch, dx, dy);
         }
-        ctx.fillStyle = "rgba(245,197,24,0.42)";
+        ctx.fillStyle = "rgba(216,162,160,0.42)";
         ctx.fillText(this.ch, 0, 0);
         ctx.restore();
       }
@@ -488,8 +488,8 @@ export function SplashAnimation() {
       ctx.fillStyle = PAPER;
       ctx.fillRect(0, 0, W, H);
       const grad = ctx.createRadialGradient(W / 2, H * 0.45, 0, W / 2, H * 0.45, Math.max(W, H) * 0.75);
-      grad.addColorStop(0, "rgba(201,138,45,0)");
-      grad.addColorStop(1, "rgba(201,138,45,0.08)");
+      grad.addColorStop(0, "rgba(216,162,160,0)");
+      grad.addColorStop(1, "rgba(216,162,160,0.08)");
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
       specks.forEach((s) => { s.update(); s.draw(); });
@@ -503,7 +503,7 @@ export function SplashAnimation() {
         const op = clamp((t - T.tagline) / 900, 0, 0.7);
         const txt = "WEIGHTLESS  ·  AI";
         const ls = 2.2;
-        ctx.fillStyle = `rgba(245,197,24,${op})`;
+        ctx.fillStyle = `rgba(216,162,160,${op})`;
         ctx.font = `300 10px ${FONT_MONO}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
