@@ -11,8 +11,8 @@ const SCRIPT = [
 
 const T = {
   morph: 3630,
-  titleStart: 7520,
-  tagline: 8520
+  titleStart: 4200,
+  tagline: 5600
 };
 
 const KLEIN = "#D8A2A0";
@@ -324,7 +324,7 @@ export function SplashAnimation() {
         ctx.translate(this.x, this.y);
         ctx.rotate(this.rot);
         ctx.scale(this.scale, this.scale);
-        ctx.font = `italic 400 ${this.fontSize}px ${FONT_SERIF}`;
+        ctx.font = `400 ${this.fontSize}px ${FONT_SERIF}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         // 柔和立体描边
@@ -362,7 +362,7 @@ export function SplashAnimation() {
       specks = Array.from({ length: Math.max(8, Math.floor(W * H / 12000)) }, () => new Speck(true));
       titles = [];
       titleFontSize = Math.max(54, Math.min(96, W * 0.22));
-      ctx.font = `italic 400 ${titleFontSize}px ${FONT_SERIF}`;
+      ctx.font = `400 ${titleFontSize}px ${FONT_SERIF}`;
       const word = "Eos";
       const widths = [...word].map((c) => ctx.measureText(c).width);
       const spacing = titleFontSize * 0.04;
