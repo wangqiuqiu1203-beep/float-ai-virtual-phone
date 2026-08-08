@@ -986,7 +986,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     const [offlineMode, setOfflineMode] = useState(false);
     const [theaterMode, setTheaterMode] = useState(() => kvGet(CHAT_THEATER_MODE_PREFIX + session.id) === "1");
     const [showTranslationQuick, setShowTranslationQuick] = useState(false);
-    const [quickDialect, setQuickDialect] = useState(session.dialectMode === true);
+    const [quickDialect, setQuickDialect] = useState(session.universalTranslationMode === true || session.dialectMode === true);
     const [quickShowTranslation, setQuickShowTranslation] = useState(session.collapseBilingualTranslation !== true);
     const [offlineTurns, setOfflineTurns] = useState<ChatOfflineTurn[]>([]);
     const [offlineVisibleCount, setOfflineVisibleCount] = useState(OFFLINE_INITIAL_LOAD);
@@ -4785,8 +4785,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                             >
                                                 <div className="flex items-center justify-between gap-3">
                                                     <div className="min-w-0">
-                                                        <div className="text-[13px] font-medium" style={{ color: "var(--c-text-title)" }}>粤语翻译</div>
-                                                        <div className="text-[11px] truncate" style={{ color: "var(--c-text)" }}>角色说粤语，附普通话译文</div>
+                                                        <div className="text-[13px] font-medium" style={{ color: "var(--c-text-title)" }}>通用翻译</div>
+                                                        <div className="text-[11px] truncate" style={{ color: "var(--c-text)" }}>任何外语都附普通话译文</div>
                                                     </div>
                                                     <button
                                                         type="button"
@@ -4795,7 +4795,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                                         onClick={() => {
                                                             const next = !quickDialect;
                                                             setQuickDialect(next);
-                                                            Object.assign(session, { dialectMode: next, bilingualTranslationEnabled: true });
+                                                            Object.assign(session, { universalTranslationMode: next, dialectMode: false, bilingualTranslationEnabled: true });
                                                             saveChatSessions(loadChatSessions().map(s => s.id === session.id ? session : s));
                                                         }}
                                                     >

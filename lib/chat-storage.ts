@@ -50,6 +50,7 @@ export type ChatSession = {
     bilingualTranslationPrompt?: string;
     offlineBilingualTranslationPrompt?: string;
     dialectMode?: boolean; // 粤语翻译模式：角色用粤语回复并附普通话译文
+    universalTranslationMode?: boolean; // 通用翻译模式：角色保持原语言（英/西/意/粤等），非中文内容附普通话译文
     // ──聊天级世界书（仿"为此聊天单独自定义"）──
     worldBookOverride?: boolean; // 开启后本聊天只使用 worldBookIds 勾选的书（替代角色绑定+全局）
     worldBookIds?: string[]; // 本聊天勾选的世界书 id

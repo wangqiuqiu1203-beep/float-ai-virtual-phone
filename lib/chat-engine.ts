@@ -66,13 +66,15 @@ import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
 import { isMediaStoreRef, loadMediaBlob } from "./media-cache-storage";
 import {
-  DEFAULT_CHAT_BILINGUAL_PROMPT,
-  DEFAULT_DIALECT_CANTONESE_PROMPT,
-  DEFAULT_DIALECT_CANTONESE_OFFLINE_PROMPT,
-  DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT,
-  DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT,
-  DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
-  resolveBilingualPrompt,
+DEFAULT_CHAT_BILINGUAL_PROMPT,
+DEFAULT_DIALECT_CANTONESE_PROMPT,
+DEFAULT_DIALECT_CANTONESE_OFFLINE_PROMPT,
+DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT,
+DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT,
+DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
+DEFAULT_UNIVERSAL_TRANSLATION_PROMPT,
+DEFAULT_UNIVERSAL_TRANSLATION_OFFLINE_PROMPT,
+resolveBilingualPrompt,
 } from "./bilingual-prompt-defaults";
 import { parseOfflineResponse, type ParsedOfflineResponse } from "./chat-offline-storage";
 import { throwIfAborted } from "./abort-utils";
@@ -1785,13 +1787,17 @@ export async function buildChatPromptMessages(
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
     const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt();
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
-    const chatBilingualInstruction = !session.isGroup
-  ? session.dialectMode
-    ? buildChatBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_PROMPT)
-    : buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
-  : "";
+const chatBilingualInstruction = !session.isGroup
+    ? session.universalTranslationMode
+        ? buildChatBilingualInstruction(true, "single", DEFAULT_UNIVERSAL_TRANSLATION_PROMPT)
+        : session.dialectMode
+            ? buildChatBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_PROMPT)
+            : buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
+    : "";
     const offlineBilingualInstruction = !session.isGroup
-        ? session.dialectMode
+    ? session.universalTranslationMode
+        ? buildOfflineBilingualInstruction(true, "single", DEFAULT_UNIVERSAL_TRANSLATION_OFFLINE_PROMPT)
+        : session.dialectMode
             ? buildOfflineBilingualInstruction(true, "single", DEFAULT_DIALECT_CANTONESE_OFFLINE_PROMPT)
             : buildOfflineBilingualInstruction(
                 session.bilingualTranslationEnabled !== false,

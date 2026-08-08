@@ -171,6 +171,7 @@ export function ChatSettingsPanel({
     const [bilingualTranslationEnabled, setBilingualTranslationEnabled] = useState(session.bilingualTranslationEnabled !== false);
     const [collapseBilingualTranslation, setCollapseBilingualTranslation] = useState(session.collapseBilingualTranslation !== false);
     const [dialectMode, setDialectMode] = useState(session.dialectMode === true);
+    const [universalMode, setUniversalMode] = useState(session.universalTranslationMode === true);
     const defaultBilingualPrompt = session.isGroup ? DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT : DEFAULT_CHAT_BILINGUAL_PROMPT;
     const defaultOfflineBilingualPrompt = session.isGroup ? DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT : DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT;
     const [bilingualTranslationPrompt, setBilingualTranslationPrompt] = useState(session.bilingualTranslationPrompt || defaultBilingualPrompt);
@@ -796,26 +797,46 @@ export function ChatSettingsPanel({
                                     <ChatInfoIcon icon={Languages} color={BINDING_ACCENTS.memory} />
                                     <div className="menu-label-group">
                                         <span className="menu-label">角色输出语言</span>
-                                        <span className="menu-desc">粤语模式：角色说粤语，每句附普通话翻译</span>
+                                        <span className="menu-desc">
+                                            {universalMode
+                                                ? "通用翻译：任何外语都附普通话译文"
+                                                : dialectMode
+                                                    ? "粤语模式：角色说粤语，每句附普通话翻译"
+                                                    : "原语言：保持角色原本语言"}
+                                        </span>
                                     </div>
                                     <div className="menu-right flex items-center gap-1.5 shrink-0">
                                         <button
                                             type="button"
-                                            className={`ui-btn h-7 px-2.5 text-xs ${dialectMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
+                                            className={`ui-btn h-7 px-2.5 text-xs ${universalMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
+                                            onClick={() => {
+                                                setUniversalMode(true);
+                                                setDialectMode(false);
+                                                setBilingualTranslationEnabled(true);
+                                                updateSession({ universalTranslationMode: true, dialectMode: false, bilingualTranslationEnabled: true });
+                                            }}
+                                        >
+                                            通用翻译
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className={`ui-btn h-7 px-2.5 text-xs ${!universalMode && dialectMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
                                             onClick={() => {
                                                 setDialectMode(true);
+                                                setUniversalMode(false);
                                                 setBilingualTranslationEnabled(true);
-                                                updateSession({ dialectMode: true, bilingualTranslationEnabled: true });
+                                                updateSession({ dialectMode: true, universalTranslationMode: false, bilingualTranslationEnabled: true });
                                             }}
                                         >
                                             粤语
                                         </button>
                                         <button
                                             type="button"
-                                            className={`ui-btn h-7 px-2.5 text-xs ${!dialectMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
+                                            className={`ui-btn h-7 px-2.5 text-xs ${!universalMode && !dialectMode ? "ui-btn-primary" : "ui-btn-ghost"}`}
                                             onClick={() => {
                                                 setDialectMode(false);
-                                                updateSession({ dialectMode: false });
+                                                setUniversalMode(false);
+                                                updateSession({ dialectMode: false, universalTranslationMode: false });
                                             }}
                                         >
                                             原语言
