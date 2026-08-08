@@ -205,6 +205,35 @@ export type TavernBundleExtra = {
 };
 
 /**
+ * 清洗酒馆世界书：剔除项目「不支持的导入格式」拦截字段，
+ * 否则 parseWorldBookFromJson 会抛 UNSUPPORTED_IMPORT_FORMAT 导致导入失败。
+ */
+function sanitizeTavernWorldBook(rawWb: unknown): unknown {
+  if (!rawWb || typeof rawWb !== "object") return rawWb;
+  try {
+    const wb = JSON.parse(JSON.stringify(rawWb)) as Record<string, unknown>;
+    // 根级外部字段
+    for (const f of ["recursiveScan", "caseSensitive", "originalData", "globalSelect"]) {
+      delete wb[f];
+    }
+    // 条目级外部字段（保留 keys/constant/selective/enabled/position/insertion_order/use_regex/comment/content/id）
+    if (Array.isArray(wb.entries)) {
+      wb.entries = (wb.entries as unknown[]).map((e) => {
+        if (!e || typeof e !== "object") return e;
+        const clean = { ...(e as Record<string, unknown>) };
+        for (const f of ["secondary_keys", "extensions", "selectiveLogic", "characterFilter", "vectorized"]) {
+          delete clean[f];
+        }
+        return clean;
+      });
+    }
+    return wb;
+  } catch {
+    return rawWb;
+  }
+}
+
+/**
  * 从酒馆卡对象中提取附加内容：
  * - 世界书：V2 在顶层 character_book；V3 在 data.character_book（部分卡在 data.extensions.world_book）
  * - 正则脚本：data.extensions.regex_scripts（酒馆正则，包装成 { rules: [...] } 供 parseRegexFromJson 使用）
@@ -220,8 +249,9 @@ export function extractTavernBundle(
   const extensions = rawData.extensions;
   // 世界书（V2/V3 通用：data.character_book / 顶层 character_book / extensions.world_book）
   const rawWb = rawData.character_book ?? rawObj.character_book ?? extensions?.world_book ?? null;
+  const cleanedWb = rawWb ? sanitizeTavernWorldBook(rawWb) : null;
   const worldBookJson =
-    rawWb && typeof rawWb === "object" && rawWb !== null ? JSON.stringify(rawWb) : null;
+    cleanedWb && typeof cleanedWb === "object" ? JSON.stringify(cleanedWb) : null;
   // 正则脚本（酒馆 regex_scripts 数组 → 包装成项目组格式）
   const regexScripts = Array.isArray(extensions?.regex_scripts)
     ? (extensions.regex_scripts as unknown[])
