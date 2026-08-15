@@ -6396,6 +6396,7 @@
   border-radius: 50%;
   background: var(--c-danger, #ff3b30);
   border: 1.5px solid var(--c-header-bg, #fff);
+}
 /* ── 思维链（Claude app 风格：触发条 + 底部弹窗） ── */
 
 .chat-reasoning-trigger {
