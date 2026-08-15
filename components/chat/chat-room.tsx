@@ -1,15 +1,19 @@
 "use client";
 
 import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages } from "@/lib/chat-storage";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-parser";
+import { isKnownStickerLabel } from "@/lib/sticker-data";
+import { translateReasoningText } from "@/lib/reasoning-translate";
 import { MessageBubble, MediaDetailModal, prewarmStickerCache, BilingualTextBlock, isStandaloneHtmlPreviewContent, normalizeTextBubbleContent } from "./message-bubble";
 import { PhotoInputModal, TextPhotoModal, VoiceRecordModal, RedPacketModal, LocationInputModal, SystemInstructionModal } from "./rich-input-modals";
 import { EmojiPanel, StickerPanel } from "./emoji-panel";
+import { StickerSearchSuggest } from "./sticker-search-suggest";
 import { StateValuesPanel } from "./state-values-panel";
 import { generateChatCompletion, generateOfflineChatCompletion, flattenCompletionResult, ChatEngineError } from "@/lib/chat-engine";
+import { formatOfflineTurnXml as formatOfflineTurnXmlShared, buildOfflinePromptHistory as buildOfflinePromptHistoryShared } from "@/lib/offline-prompt-builder";
 import { sendBrowserNotification } from "@/lib/browser-notification";
 import { dispatchChatMessageNotice } from "@/lib/chat-notification-events";
 import { shouldSendChatInputOnEnter } from "@/lib/chat-input-keyboard";
@@ -41,9 +45,9 @@ import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
 import { scheduleFollowUp, cancelFollowUp } from "@/lib/follow-up-service";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, Clapperboard, Gift, Loader2, MoreHorizontal, X, Languages } from "lucide-react";
+import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
 import { setDebugChatState } from "@/lib/debug-store";
-import { scopeSessionCSS } from "@/lib/css-scoper";
+import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { setChatActive } from "@/lib/music-action-queue";
 import { getMusicControlBridge } from "@/lib/music-control-bridge";
 import { findPlayableMatch, getNeteaseLyrics, getNeteaseSongDetail } from "@/lib/music-service";
@@ -64,8 +68,19 @@ import {
 } from "@/lib/generated-image-retry";
 import { scrollElementWithinContainer } from "@/lib/dom-scroll";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
+import { ChatScreenEffectOverlay, type ActiveScreenEffect } from "./chat-screen-effect";
+import {
+    formatChatDiceResultMessage,
+    isDiceOnlyMessage,
+    matchChatScreenEffectRule,
+    rollChatDiceFace,
+} from "@/lib/chat-screen-effects";
 import { abortableDelay, throwIfAborted } from "@/lib/abort-utils";
 import { GROUP_SELF_KEY, canGroupAdminAct, applyGroupAdminAction, buildGroupAdminNoticeText, getGroupMemberDisplayName, getGroupMuteRemainingMs, getGroupRole, isGroupMuted, formatMuteRemainingLabel, resolveGroupMemberKeyByName, type GroupAdminAction } from "@/lib/group-admin";
+import { extractTextToolDirectiveText } from "@/lib/text-tool-protocol";
+import { emitChatPluginEvent, getChatPluginHookBus, runChatPluginTransform } from "@/lib/chat-plugin-hooks";
+import { CHAT_PLUGIN_TOAST_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin-runtime";
+import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
 
 // ── Call system message detection ──────────────────────────
 // Call messages are stored with user/assistant role for correct prompt alternation,
@@ -76,6 +91,12 @@ function isCallSysMsg(msg: ChatMessage): boolean {
 }
 /** Returns the effective UI role: call messages render as "system" regardless of stored role */
 const ACTION_MEDIA_TYPES = new Set(["poke", "accept_red_packet", "decline_red_packet", "accept_transfer", "decline_transfer", "accept_payment_request", "decline_payment_request", "group_admin_notice"]);
+// 拍一拍/群管理通知/通话留痕渲染成灰色系统小字，没有 💭 面板入口——
+// 状态栏/内心独白/状态值挂上去会被显示层吞掉，挂载时必须跳过它们
+function canCarryFoldedPanel(part: { content?: string; mediaType?: ChatMessage["mediaType"] }): boolean {
+    if (part.mediaType === "poke" || part.mediaType === "group_admin_notice") return false;
+    return !CALL_SYS_RE.test(part.content || "");
+}
 function uiRole(msg: ChatMessage): string {
     if (msg.role === "system" || ACTION_MEDIA_TYPES.has(msg.mediaType || "")) return "system";
     if (isCallSysMsg(msg)) return "system";
@@ -145,6 +166,7 @@ const OfflineAssistantTextBlock = memo(function OfflineAssistantTextBlock({
 
 const CHAT_VISUAL_MEDIA_TYPES = new Set([
     "sticker",
+    "dice",
     "red_packet",
     "transfer",
     "payment_request",
@@ -192,6 +214,7 @@ function getWeixinCloudDeleteTargetCount(messages: ChatMessage[]): number {
 
 const CHAT_MEDIA_BUBBLE_TYPES = new Set([
     "sticker",
+    "dice",
     "red_packet",
     "transfer",
     "payment_request",
@@ -223,13 +246,34 @@ function isChatVisualMedia(msg: ChatMessage): boolean {
     return !!msg.mediaType && CHAT_VISUAL_MEDIA_TYPES.has(msg.mediaType);
 }
 
+/** 思维链触发条的单行摘要：取首个非空行并剥离 markdown 标记（**、`、# 等），避免星号原样显示 */
+function reasoningPreviewLine(text: string): string {
+    for (const rawLine of text.split("\n")) {
+        const line = rawLine
+            .replace(/```+/g, "")
+            .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+            .replace(/\*\*([^*]+)\*\*/g, "$1")
+            .replace(/__([^_]+)__/g, "$1")
+            .replace(/\*([^*]+)\*/g, "$1")
+            .replace(/`([^`]+)`/g, "$1")
+            .replace(/^\s*#{1,6}\s+/, "")
+            .replace(/^\s*>\s+/, "")
+            .replace(/^\s*[-*+]\s+/, "")
+            .replace(/[*`]+/g, "")
+            .trim();
+        if (line) return line;
+    }
+    return "思考过程";
+}
+
 function isHiddenChatFlowMessage(msg: ChatMessage, displayContent?: string): boolean {
-    if (msg.mediaType === "tool_result") return true;
+    if (msg.mediaType === "tool_result" || msg.mediaType === "tool_call") return true;
     return !isChatVisualMedia(msg)
         && !getChatFlowVisibleContent(msg, displayContent)
         && uiRole(msg) !== "system"
         && !msg.statusPanel
-        && !msg.innerMonologue;
+        && !msg.innerMonologue
+        && !msg.reasoningText;
 }
 
 // ── Background generation tracking ──────────────────────────
@@ -610,6 +654,8 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
+    const [suggestClosed, setSuggestClosed] = useState(false);
     // 围观群/被禁言：输入与富媒体入口全部锁定，只留线下切换和生成按钮
     const [muteNowTick, setMuteNowTick] = useState(() => Date.now());
     useEffect(() => {
@@ -658,6 +704,11 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     };
 
     const panelOpen = showEmojiPanel || showStickerPanel || showPlusMenu;
+    const suggestCharacterIds = useMemo(
+        () => (isGroup ? (stickerCharacterIds || []) : characterId ? [characterId] : []),
+        [isGroup, stickerCharacterIds, characterId],
+    );
+    const suggestEnabled = !inputLocked && !panelOpen && !suggestClosed && inputText.trim().length > 0;
     const plusMenuItems = [
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21 15 16 10 5 21" /></svg>, label: "照片墙", onClick: () => onOpenRichModal("photo") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="7" y1="8" x2="17" y2="8" /><line x1="7" y1="12" x2="14" y2="12" /><line x1="7" y1="16" x2="11" y2="16" /></svg>, label: "文字图片", onClick: () => onOpenRichModal("text_photo") },
@@ -707,12 +758,21 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                 </div>
             )}
 
+            {suggestEnabled && (
+                <StickerSearchSuggest
+                    query={inputText}
+                    characterIds={suggestCharacterIds}
+                    onSend={(name, url) => onSendSticker(name, url)}
+                    onClose={() => setSuggestClosed(true)}
+                />
+            )}
             <textarea
                 ref={textareaRef}
                 rows={1}
                 value={inputText}
                 onChange={e => {
                     setInputText(e.target.value);
+                    setSuggestClosed(false);
                     e.target.style.height = "auto";
                     e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
                 }}
@@ -723,8 +783,14 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                         const target = e.target as HTMLTextAreaElement;
                         requestAnimationFrame(() => requestAnimationFrame(() => target.focus()));
                     }
+                    setSuggestClosed(false);
                 }}
+                onBlur={() => setSuggestClosed(true)}
                 onKeyDown={e => {
+                    if (e.key === "Escape") {
+                        setSuggestClosed(true);
+                        return;
+                    }
                     if (shouldSendChatInputOnEnter(e, enterToSendEnabled)) {
                         e.preventDefault();
                         handleSubmit();
@@ -798,9 +864,19 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     ))}
                 </div>
             )}
+            {showPlusMenu && (
+                <ChatPluginSlot name="chat.inputToolbar" slotProps={{ isGroup }} className="chat-plugin-input-toolbar" />
+            )}
 
             {showEmojiPanel && (
-                <EmojiPanel onSelect={(emoji) => appendText(emoji, { focus: false })} />
+                <EmojiPanel
+                    onSelect={(emoji) => appendText(emoji, { focus: false })}
+                    onEffectSend={(text) => {
+                        if (inputLocked || isGenerating) return;
+                        onSendText(text);
+                        onClosePanels();
+                    }}
+                />
             )}
 
             {showStickerPanel && (
@@ -1043,10 +1119,99 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         setTheaterMode(kvGet(CHAT_THEATER_MODE_PREFIX + session.id) === "1");
     }, [session.id]);
 
+    // 聊天插件：进入聊天广播 session.opened
+    useEffect(() => {
+        emitChatPluginEvent("session.opened", { sessionId: session.id, isGroup: !!session.isGroup });
+    }, [session.id, session.isGroup]);
+
+    // 聊天插件：监听插件 toast（支持常驻加载态 + 手动关闭）
+    const chatToastIdRef = useRef<string | null>(null);
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ id?: string; text: string; durationMs?: number; close?: boolean }>).detail || { text: "" };
+            // 关闭请求：仅当关闭的是当前正在显示的那条时才清除
+            if (detail.close) {
+                if (chatToastIdRef.current === detail.id) {
+                    clearTimeout(chatToastTimer.current);
+                    setChatToast(null);
+                    chatToastIdRef.current = null;
+                }
+                return;
+            }
+            if (!detail.text) return;
+            clearTimeout(chatToastTimer.current);
+            chatToastIdRef.current = detail.id ?? null;
+            setChatToast(detail.text);
+            // durationMs <= 0 表示常驻（加载态），不自动消失；缺省用 2400ms
+            if (detail.durationMs === undefined || detail.durationMs > 0) {
+                chatToastTimer.current = setTimeout(() => {
+                    setChatToast(null);
+                    chatToastIdRef.current = null;
+                }, detail.durationMs ?? 2400);
+            }
+        };
+        window.addEventListener(CHAT_PLUGIN_TOAST_EVENT, handler);
+        return () => window.removeEventListener(CHAT_PLUGIN_TOAST_EVENT, handler);
+    }, []);
+
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
     const [bgLoading, setBgLoading] = useState(!!session.backgroundImage);
 
     const wrapperRef = useRef<HTMLDivElement>(null);
+
+    // 全屏特效：命中触发词的新消息播放表情雨/礼花（微信同款）
+    const [activeScreenEffect, setActiveScreenEffect] = useState<ActiveScreenEffect | null>(null);
+    const screenFxSeenRef = useRef<Set<string>>(new Set());
+    const screenFxMountedAtRef = useRef(Date.now());
+
+    useEffect(() => {
+        const seen = screenFxSeenRef.current;
+        let fired = activeScreenEffect !== null;
+        for (const msg of messages) {
+            if (seen.has(msg.id)) continue;
+            seen.add(msg.id);
+            if (msg.role !== "user" && msg.role !== "assistant") continue;
+            // 只对本次打开聊天室之后产生的消息生效，历史加载/翻页不触发
+            if (new Date(msg.createdAt).getTime() < screenFxMountedAtRef.current) continue;
+            // 骰子气泡：气泡自己翻滚定格，这里同步播全屏骰子（点数一致）
+            if (msg.mediaType === "dice") {
+                if (fired) continue;
+                const face = Math.min(6, Math.max(1, Number(msg.mediaData?.diceFace) || 1));
+                setActiveScreenEffect({ runId: msg.id, effect: "dice", emojis: "", diceFace: face });
+                fired = true;
+                continue;
+            }
+            if (msg.mediaType || !msg.content) continue;
+            const hit = matchChatScreenEffectRule(msg.content);
+            if (!hit) continue;
+            if (hit.effect === "dice") {
+                // 单独一条骰子图标（角色发的）：原地转成骰子气泡（内容保持图标），
+                // 点数由系统旁白公布，避免结果挂在角色消息上被模仿
+                const face = rollChatDiceFace();
+                const patch = {
+                    mediaType: "dice" as const,
+                    mediaData: { ...msg.mediaData, diceFace: face },
+                };
+                updateChatMessage(msg.id, patch);
+                setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, ...patch } : m)));
+                const diceAside = pushChatMessage({
+                    sessionId: session.id,
+                    role: "system",
+                    content: formatChatDiceResultMessage(face),
+                });
+                setMessages(prev => [...prev, diceAside]);
+                if (!fired) {
+                    setActiveScreenEffect({ runId: msg.id, effect: "dice", emojis: "", diceFace: face });
+                    fired = true;
+                }
+                continue;
+            }
+            if (fired) continue;
+            setActiveScreenEffect({ runId: msg.id, ...hit });
+            fired = true;
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [messages]);
 
     useEffect(() => {
         if (!session.backgroundImage) {
@@ -1078,6 +1243,35 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
     const [showConfirmMultiDelete, setShowConfirmMultiDelete] = useState(false);
     const [expandedMonologueId, setExpandedThinkingId] = useState<string | null>(null);
+    // 思维链底部弹窗：存当前查看的 reasoning 文本，null = 关闭
+    const [reasoningSheetText, setReasoningSheetText] = useState<string | null>(null);
+    // 思维链翻译（弹窗内点击翻译按钮生成，切换弹窗内容时重置）
+    const [reasoningTranslation, setReasoningTranslation] = useState<string | null>(null);
+    const [reasoningTranslating, setReasoningTranslating] = useState(false);
+    const [reasoningTranslateError, setReasoningTranslateError] = useState<string | null>(null);
+    // 译文显示模式：对照（中文在上）/ 仅中文 / 仅原文
+    const [reasoningViewMode, setReasoningViewMode] = useState<"both" | "zh" | "orig">("both");
+    useEffect(() => {
+        setReasoningTranslation(null);
+        setReasoningTranslating(false);
+        setReasoningTranslateError(null);
+        setReasoningViewMode("both");
+    }, [reasoningSheetText]);
+    const handleTranslateReasoning = async () => {
+        if (!reasoningSheetText || reasoningTranslating) return;
+        if (reasoningTranslation) { setReasoningTranslation(null); setReasoningViewMode("both"); return; }
+        setReasoningTranslating(true);
+        setReasoningTranslateError(null);
+        try {
+            const result = await translateReasoningText(reasoningSheetText);
+            if (result.content) { setReasoningTranslation(result.content); setReasoningViewMode("both"); }
+            else setReasoningTranslateError(result.error || "翻译失败，请重试");
+        } catch {
+            setReasoningTranslateError("翻译失败，请重试");
+        } finally {
+            setReasoningTranslating(false);
+        }
+    };
     const [voiceTextIds, setVoiceTextIds] = useState<Set<string>>(new Set());
     const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
     const [editingContent, setEditingContent] = useState("");
@@ -1389,6 +1583,16 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             activeTags: getRegexActiveTags(isOffline),
         });
     }, [activeRegexes, displayRegexMacroEngine, getRegexActiveTags]);
+
+    // 「丢弃角色输出的无效表情包」开关：滤除名称不在角色表情包/内置表情中的 sticker part
+    const stripInvalidStickerParts = useCallback((parts: ParsedMessagePart[], senderCharacterId?: string): ParsedMessagePart[] => {
+        if (session.discardInvalidStickers !== true) return parts;
+        const characterIds = senderCharacterId
+            ? [senderCharacterId]
+            : (session.isGroup ? (session.participantIds ?? []) : [session.contactId]);
+        return parts.filter(part => part.mediaType !== "sticker"
+            || isKnownStickerLabel(part.mediaData?.label || "", characterIds));
+    }, [session.discardInvalidStickers, session.isGroup, session.participantIds, session.contactId]);
 
     const normalizeDisplayParts = useCallback((parts: ReturnType<typeof parseAIResponse>["parts"]) => {
         const charN = character?.name || "对方";
@@ -2070,10 +2274,18 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         results: { characterId: string; characterName: string; responseText: string }[],
         msgsSetter: typeof setMessages,
         guard?: GenerationRunGuard,
+        roundReasoning?: string,
     ) => {
         throwIfGenerationStopped(guard);
         const responseRoundId = createResponseRoundId();
         const editableResponseText = buildEditableGroupRoundText(results);
+        // 群聊一轮回复只有一份思维链，挂到本轮第一条落库消息上
+        let reasoningAttached = !roundReasoning;
+        const takeRoundReasoning = (): string | undefined => {
+            if (reasoningAttached) return undefined;
+            reasoningAttached = true;
+            return roundReasoning;
+        };
         const imageReplacementTasks: Promise<unknown>[] = [];
         const currentStateByCharacter = new Map<string, StateValue[]>();
         const getCurrentStateForCharacter = (characterId: string): StateValue[] => {
@@ -2090,7 +2302,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             if (!(session.participantIds || []).includes(r.characterId)) continue;
             if (isGroupMuted(session, r.characterId)) continue;
             const responseBatchId = createResponseBatchId();
-            const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(r.responseText, getCurrentStateForCharacter(r.characterId));
+            const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(r.responseText, getCurrentStateForCharacter(r.characterId));
+            const parts = stripInvalidStickerParts(rawParts, r.characterId);
             let attachedState = false;
             let savedAnyPart = false;
             for (const part of parts) {
@@ -2171,13 +2384,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         rawResponseText: r.responseText,
                         responseRoundId,
                         editableResponseText,
-                        statusPanel: !attachedState && statusPanel ? statusPanel : undefined,
-                        innerMonologue: !attachedState && innerMonologue ? innerMonologue : undefined,
-                        stateValues: !attachedState && stateValues.length > 0 ? stateValues : undefined,
+                        // 系统小字样式不显示面板，不在这里挂载（见 canCarryFoldedPanel）
                         senderCharacterId: r.characterId,
                         senderName: applied.senderName,
                     });
-                    attachedState = true;
                     savedAnyPart = true;
                     msgsSetter(prev => [...prev, msg]);
                     continue;
@@ -2198,13 +2408,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         rawResponseText: r.responseText,
                         responseRoundId,
                         editableResponseText,
-                        statusPanel: !attachedState && statusPanel ? statusPanel : undefined,
-                        innerMonologue: !attachedState && innerMonologue ? innerMonologue : undefined,
-                        stateValues: !attachedState && stateValues.length > 0 ? stateValues : undefined,
+                        // 系统小字样式不显示面板，不在这里挂载（见 canCarryFoldedPanel）
                         senderCharacterId: r.characterId,
                         senderName: pokeSender,
                     });
-                    attachedState = true;
                     savedAnyPart = true;
                     msgsSetter(prev => [...prev, msg]);
                     dispatchChatMessageNotice({
@@ -2218,6 +2425,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 if (!isFirst) await abortableDelay(800, guard?.signal);
                 throwIfGenerationStopped(guard);
                 isFirst = false;
+                const attachHere = !attachedState && canCarryFoldedPanel(part);
                 const draft = buildAssistantMessageDraft(part, {
                     sessionId: session.id,
                     role: "assistant",
@@ -2228,16 +2436,18 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     rawResponseText: r.responseText,
                     responseRoundId,
                     editableResponseText,
-                    statusPanel: !attachedState && statusPanel ? statusPanel : undefined,
-                    innerMonologue: !attachedState && innerMonologue ? innerMonologue : undefined,
-                    stateValues: !attachedState && stateValues.length > 0 ? stateValues : undefined,
+                    statusPanel: attachHere && statusPanel ? statusPanel : undefined,
+                    innerMonologue: attachHere && innerMonologue ? innerMonologue : undefined,
+                    reasoningText: takeRoundReasoning(),
+                    stateValues: attachHere && stateValues.length > 0 ? stateValues : undefined,
+                    freshStateValues: attachHere ? freshStateValues : undefined,
                     senderCharacterId: r.characterId,
                     senderName: r.characterName,
                 }, guard);
                 throwIfGenerationStopped(guard);
                 const msg = pushChatMessage(draft);
                 imageReplacementTasks.push(scheduleGeneratedImageReplacement(msg, r.characterId, guard));
-                attachedState = true;
+                if (attachHere) attachedState = true;
                 savedAnyPart = true;
                 msgsSetter(prev => [...prev, msg]);
                 const body = msg.content.trim()
@@ -2251,7 +2461,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     isGroup: true,
                 });
             }
-            if (!savedAnyPart && (statusPanel || innerMonologue)) {
+            // 面板没落到任何正常气泡上（纯静默，或整段只有拍一拍/群管理通知）→ 补空消息驮面板
+            if (!attachedState && (statusPanel || innerMonologue || stateValues.length > 0)) {
                 throwIfGenerationStopped(guard);
                 const msg = pushChatMessage({
                     sessionId: session.id,
@@ -2263,7 +2474,9 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     editableResponseText,
                     statusPanel,
                     innerMonologue,
+                    reasoningText: takeRoundReasoning(),
                     stateValues: stateValues.length > 0 ? stateValues : undefined,
+                    freshStateValues,
                     senderCharacterId: r.characterId,
                     senderName: r.characterName,
                 });
@@ -2469,15 +2682,21 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     // Returns { hasVisible, stateValues, hasDecline } — hasVisible is false if the AI chose [静默].
     const splitAndSaveAIMessages = async (
         aiResponseText: string,
-        options?: { promptHidden?: boolean } & GenerationRunGuard,
+        options?: {
+            responseBatchId?: string;
+            rawResponseText?: string;
+            reasoningText?: string;
+        } & GenerationRunGuard,
     ): Promise<{ hasVisible: boolean; stateValues: StateValue[]; triggerCall?: "voice" | "video"; hasDecline?: boolean }> => {
         throwIfGenerationStopped(options);
-        const responseBatchId = createResponseBatchId();
+        const responseBatchId = options?.responseBatchId || createResponseBatchId();
+        const rawResponseText = options?.rawResponseText ?? aiResponseText;
         const previousState = session.isGroup
             ? getLatestStateValues(session.id)
             : getLatestCharacterStateValues(session.contactId);
 
-        const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
+        const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
+        const parts = stripInvalidStickerParts(rawParts);
         throwIfGenerationStopped(options);
 
         // Detect call triggers and AI media actions, filter them out
@@ -2531,18 +2750,20 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         }
 
         if (filteredParts.length === 0) {
-            // Silence: only status panel / inner monologue, no visible chat text
-            if (statusPanel || innerMonologue) {
+            // Silence: only status panel / inner monologue / reasoning, no visible chat text
+            if (statusPanel || innerMonologue || options?.reasoningText) {
                 throwIfGenerationStopped(options);
                 const aiMsg = pushChatMessage({
                     sessionId: session.id,
                     role: "assistant",
                     content: "",
                     responseBatchId,
-                    rawResponseText: aiResponseText,
+                    rawResponseText,
                     statusPanel,
                     innerMonologue,
+                    reasoningText: options?.reasoningText,
                     stateValues: stateValues.length > 0 ? stateValues : undefined,
+                    freshStateValues,
                 });
                 setMessages(prev => [...prev, aiMsg]);
             }
@@ -2552,12 +2773,16 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         // Build rich-media drafts first, then publish them in the same order as the UI display.
         const messageDrafts: Array<{ draft: AssistantMessageDraft; afterPublish?: (message: ChatMessage) => Promise<unknown> | void }> = [];
         const imageReplacementTasks: Promise<unknown>[] = [];
+        // 面板挂到第一条能显示它的消息上；全是拍一拍等系统样式时补空消息驮面板
+        let metaIdx = filteredParts.findIndex(canCarryFoldedPanel);
+        if (metaIdx === -1 && (statusPanel || innerMonologue || stateValues.length > 0)) {
+            pushFilteredPart({ content: "" });
+            metaIdx = filteredParts.length - 1;
+        }
         for (let idx = 0; idx < filteredParts.length; idx += 1) {
             throwIfGenerationStopped(options);
             const part = filteredParts[idx];
-            const mediaType = part.mediaType === "poke"
-                ? "poke"
-                : options?.promptHidden ? "tool_notice" : part.mediaType;
+            const mediaType = part.mediaType;
             const draft = buildAssistantMessageDraft(part, {
                 sessionId: session.id,
                 role: "assistant",
@@ -2565,10 +2790,12 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 mediaType,
                 mediaData: part.mediaData,
                 responseBatchId,
-                rawResponseText: aiResponseText,
-                statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
-                innerMonologue: idx === 0 && innerMonologue ? innerMonologue : undefined,
-                stateValues: idx === 0 && stateValues.length > 0 ? stateValues : undefined,
+                rawResponseText,
+                statusPanel: idx === metaIdx && statusPanel ? statusPanel : undefined,
+                innerMonologue: idx === metaIdx && innerMonologue ? innerMonologue : undefined,
+                reasoningText: idx === metaIdx ? options?.reasoningText : undefined,
+                stateValues: idx === metaIdx && stateValues.length > 0 ? stateValues : undefined,
+                freshStateValues: idx === metaIdx ? freshStateValues : undefined,
             }, options);
             throwIfGenerationStopped(options);
             messageDrafts.push({
@@ -2611,7 +2838,6 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             return mediaLabels[m.mediaType] || "";
         };
         const dispatchVisibleNotice = (m: ChatMessage): void => {
-            if (options?.promptHidden) return;
             const body = getNoticeBody(m);
             if (!body) return;
             dispatchChatMessageNotice({
@@ -2662,23 +2888,33 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         else setShowVideoCall(true);
     };
 
-    const persistHiddenToolResult = (content?: string) => {
+    const persistHiddenToolResult = (content?: string, toolExecutionId?: string) => {
         if (!content) return;
         pushChatMessage({
             sessionId: session.id,
-            role: "user",
+            role: "tool",
             content,
             mediaType: "tool_result",
+            toolExecutionId,
         });
     };
 
-    const persistHiddenAssistantToolTurn = (content?: string) => {
+    const persistHiddenAssistantToolCall = (content?: string, options?: {
+        responseBatchId?: string;
+        responseRoundId?: string;
+        senderCharacterId?: string;
+        senderName?: string;
+    }) => {
         if (!content) return;
         pushChatMessage({
             sessionId: session.id,
             role: "assistant",
             content,
-            mediaType: "tool_result",
+            mediaType: "tool_call",
+            responseBatchId: options?.responseBatchId,
+            responseRoundId: options?.responseRoundId,
+            senderCharacterId: options?.senderCharacterId,
+            senderName: options?.senderName,
         });
     };
 
@@ -2720,7 +2956,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         setTransientMessages(prev => prev.filter(msg => msg.id !== msgId));
     };
 
-    const handleToolExecution = (results: ToolResult[], guard?: GenerationRunGuard) => {
+    const handleToolExecution = (results: ToolResult[], guard?: GenerationRunGuard, toolExecutionId?: string) => {
         throwIfGenerationStopped(guard);
         const pending = results.find(result => result.pendingApproval && result.pendingRequest);
         if (pending?.pendingRequest) {
@@ -2742,6 +2978,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     mediaType: "media_file",
                     mediaUrl: att.url,
                     mediaData: { fileType: att.type, fileName: att.title },
+                    toolExecutionId,
                     ...(session.isGroup ? {
                         senderCharacterId: result.actorCharacterId,
                         senderName: result.actorName,
@@ -2843,7 +3080,13 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         errorPrefix = "发送失败",
         onDecline,
     }: ManagedGenerationOptions) => {
-        if (isGeneratingRef.current) return;
+        if (isGeneratingRef.current) {
+            if (activeGenerationRuns.has(session.id)) return;
+            // 上一轮被外部取消/顶替后收尾提前返回过，标记已是陈旧状态：复位后继续本次请求
+            isGeneratingRef.current = false;
+            setIsGenerating(false);
+            clearGenerationLock(session.id);
+        }
 
         const generationRun = createGenerationRun(session.id);
         const generationRunId = generationRun.runId;
@@ -2857,18 +3100,20 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
 
         try {
             if (session.isGroup) {
+                let roundReasoning: string | undefined;
                 const results = await generateGroupChatCompletion(
                     session,
                     history,
-                    undefined,
+                    { onReasoning: (t) => { roundReasoning = t; } },
                     {
                         signal: generationRun.controller.signal,
                         appTags: theaterMode ? ["group_chat"] : undefined,
                     },
                 );
                 if (!isCurrentGeneration()) return;
-                await processGroupParts(results, setMessages, generationGuard);
+                await processGroupParts(results, setMessages, generationGuard, roundReasoning);
             } else {
+                let capturedReasoning: string | undefined;
                 const cr = await generateChatCompletion(
                     session,
                     history,
@@ -2876,9 +3121,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         appTags: theaterMode ? ["chat"] : ["chat", "text"],
                         signal: generationRun.controller.signal,
                     },
+                    { onReasoning: (t) => { capturedReasoning = t; } },
                 );
                 if (!isCurrentGeneration()) return;
-                const result = await splitAndSaveAIMessages(flattenCompletionResult(cr), generationGuard);
+                const result = await splitAndSaveAIMessages(flattenCompletionResult(cr), { ...generationGuard, reasoningText: capturedReasoning });
                 if (!isCurrentGeneration()) return;
                 scheduleFollowUp(session.id, 0, result.stateValues);
                 handleCallTrigger(result.triggerCall);
@@ -2893,12 +3139,19 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             });
             setMessages(prev => [...prev, errorMsg]);
         } finally {
-            if (!finishGenerationRun(session.id, generationRunId)) return;
-            isGeneratingRef.current = false;
-            setIsGenerating(false);
-            clearGenerationLock(session.id);
-            if (!mountedRef.current) {
-                window.dispatchEvent(new CustomEvent(CHAT_BG_COMPLETE, { detail: { sessionId: session.id } }));
+            if (finishGenerationRun(session.id, generationRunId)) {
+                isGeneratingRef.current = false;
+                setIsGenerating(false);
+                clearGenerationLock(session.id);
+                if (!mountedRef.current) {
+                    window.dispatchEvent(new CustomEvent(CHAT_BG_COMPLETE, { detail: { sessionId: session.id } }));
+                }
+            } else if (!activeGenerationRuns.has(session.id)) {
+                // 本轮被外部取消且没有新一轮接手：仍需复位，否则「生成中」标记永久卡死，
+                // 后续联动/追问的回复请求会被静默吞掉
+                isGeneratingRef.current = false;
+                setIsGenerating(false);
+                clearGenerationLock(session.id);
             }
         }
 
@@ -3123,7 +3376,13 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     };
 
     const triggerAIResponse = async () => {
-        if (isGeneratingRef.current) return;
+        if (isGeneratingRef.current) {
+            if (activeGenerationRuns.has(session.id)) return;
+            // 上一轮被外部取消/顶替后收尾提前返回过，标记已是陈旧状态：复位后继续本次请求
+            isGeneratingRef.current = false;
+            setIsGenerating(false);
+            clearGenerationLock(session.id);
+        }
         const generationRun = createGenerationRun(session.id);
         const generationRunId = generationRun.runId;
         const isCurrentGeneration = () => isGenerationRunActive(session.id, generationRunId);
@@ -3137,17 +3396,24 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             const latestMessages = loadChatMessages(session.id);
             if (session.isGroup) {
                 const streamedImageReplacementTasks: Promise<unknown>[] = [];
+                // 每轮 LLM 调用的思维链：中间轮挂到该轮首条气泡，最终轮传给 processGroupParts
+                let pendingGroupReasoning: string | undefined;
                 const results = await generateGroupChatCompletion(session, latestMessages, {
+                    onReasoning: (t) => { pendingGroupReasoning = t; },
                     onTextPart: async (text, senderInfo, options) => {
                         if (!isCurrentGeneration()) return;
                         if (!text.trim() || !senderInfo) return;
                         const cleanedEditableText = cleanEditableAssistantText(text);
                         if (!cleanedEditableText) return;
-                        const responseBatchId = createResponseBatchId();
+                        const roundReasoning = pendingGroupReasoning;
+                        pendingGroupReasoning = undefined;
+                        const responseBatchId = options?.responseBatchId || createResponseBatchId();
+                        const rawResponseText = options?.rawResponseText ?? text;
                         const responseRoundId = senderInfo.responseRoundId || createResponseRoundId();
                         const editableResponseText = senderInfo.editableResponseText || `[${senderInfo.characterName}]: ${cleanedEditableText}`;
                         const previousState = getLatestCharacterStateValues(senderInfo.characterId);
-                        const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(text, previousState);
+                        const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(text, previousState);
+                        const parts = stripInvalidStickerParts(rawParts, senderInfo.characterId);
                         let attachedState = false;
                         let savedAnyPart = false;
                         for (const part of parts) {
@@ -3157,15 +3423,17 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                 sessionId: session.id,
                                 role: "assistant",
                                 content: part.content,
-                                mediaType: options?.promptHidden ? "tool_notice" : part.mediaType,
+                                mediaType: part.mediaType,
                                 mediaData: part.mediaData,
                                 responseBatchId,
-                                rawResponseText: text,
+                                rawResponseText,
                                 responseRoundId,
                                 editableResponseText,
                                 statusPanel: !attachedState && statusPanel ? statusPanel : undefined,
                                 innerMonologue: !attachedState && innerMonologue ? innerMonologue : undefined,
+                                reasoningText: !attachedState ? roundReasoning : undefined,
                                 stateValues: !attachedState && stateValues.length > 0 ? stateValues : undefined,
+                                freshStateValues: !attachedState ? freshStateValues : undefined,
                                 senderCharacterId: senderInfo.characterId,
                                 senderName: senderInfo.characterName,
                             }, generationGuard);
@@ -3176,20 +3444,22 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             savedAnyPart = true;
                             setMessages(prev => [...prev, msg]);
                         }
-                        if (!savedAnyPart && (statusPanel || innerMonologue)) {
+                        if (!savedAnyPart && (statusPanel || innerMonologue || roundReasoning)) {
                             throwIfGenerationStopped(generationGuard);
                             const msg = pushChatMessage({
                                 sessionId: session.id,
                                 role: "assistant",
                                 content: "",
-                                mediaType: options?.promptHidden ? "tool_notice" : undefined,
+                                mediaType: undefined,
                                 responseBatchId,
-                                rawResponseText: text,
+                                rawResponseText,
                                 responseRoundId,
                                 editableResponseText,
                                 statusPanel,
                                 innerMonologue,
+                                reasoningText: roundReasoning,
                                 stateValues: stateValues.length > 0 ? stateValues : undefined,
+                                freshStateValues,
                                 senderCharacterId: senderInfo.characterId,
                                 senderName: senderInfo.characterName,
                             });
@@ -3200,17 +3470,23 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         if (!isCurrentGeneration()) return;
                         persistToolNotice(notice);
                     },
-                    onToolResult: (content) => {
+                    onToolResult: (content, options) => {
                         if (!isCurrentGeneration()) return;
-                        pushChatMessage({ sessionId: session.id, role: "user", content, mediaType: "tool_result" });
+                        pushChatMessage({
+                            sessionId: session.id,
+                            role: "tool",
+                            content,
+                            mediaType: "tool_result",
+                            toolExecutionId: options?.toolExecutionId,
+                        });
                     },
-                    onToolAssistantTurn: (content) => {
+                    onToolAssistantTurn: (content, options) => {
                         if (!isCurrentGeneration()) return;
-                        persistHiddenAssistantToolTurn(content);
+                        persistHiddenAssistantToolCall(content, options);
                     },
-                    onToolExecution: (results) => {
+                    onToolExecution: (results, _historyContent, options) => {
                         if (!isCurrentGeneration()) return;
-                        handleToolExecution(results, generationGuard);
+                        handleToolExecution(results, generationGuard, options?.toolExecutionId);
                     },
                     onNativeToolAssistantTurn: async ({ content, rawContent, reasoning, openRouterReasoningDetails, toolCalls }) => {
                         if (!isCurrentGeneration()) return;
@@ -3218,7 +3494,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         const visibleResults = parseGroupChatResponse(content, nameToId)
                             .filter(item => item.responseText.trim());
                         if (visibleResults.length > 0) {
-                            await processGroupParts(visibleResults, setMessages, generationGuard);
+                            await processGroupParts(visibleResults, setMessages, generationGuard, reasoning);
                         }
 
                         throwIfGenerationStopped(generationGuard);
@@ -3239,13 +3515,14 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         });
                         trackNativeToolCalls(session.id, generationRunId, toolCalls.map(call => ({ id: call.id, name: call.name })));
                     },
-                    onNativeToolResult: ({ toolCallId, name, content }) => {
+                    onNativeToolResult: ({ toolCallId, name, content, toolExecutionId }) => {
                         if (!isCurrentGeneration()) return;
                         pushChatMessage({
                             sessionId: session.id,
                             role: "tool",
                             content,
                             mediaType: "tool_result",
+                            toolExecutionId,
                             nativeToolResult: { toolCallId, name, content },
                         });
                         resolveNativeToolCall(session.id, generationRunId, toolCallId);
@@ -3259,32 +3536,37 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     await Promise.allSettled(streamedImageReplacementTasks);
                     throwIfGenerationStopped(generationGuard);
                 }
-                await processGroupParts(results, setMessages, generationGuard);
+                await processGroupParts(results, setMessages, generationGuard, pendingGroupReasoning);
             } else {
                 let lastSendResult: Awaited<ReturnType<typeof splitAndSaveAIMessages>> | undefined;
+                // 每轮 LLM 调用的思维链，onReasoning 先于该轮 onTextPart 触发
+                let pendingReasoning: string | undefined;
 
                 const result = await generateChatCompletion(session, latestMessages, {
                     appTags: theaterMode ? ["chat"] : ["chat", "text"],
                     signal: generationRun.controller.signal,
                 }, {
+                    onReasoning: (t) => { pendingReasoning = t; },
                     onTextPart: async (text, _senderInfo, options) => {
                         if (!isCurrentGeneration()) return;
                         if (text.trim()) {
-                            lastSendResult = await splitAndSaveAIMessages(text, { ...options, ...generationGuard });
+                            const reasoningText = pendingReasoning;
+                            pendingReasoning = undefined;
+                            lastSendResult = await splitAndSaveAIMessages(text, { ...options, ...generationGuard, reasoningText });
                         }
                     },
                     onToolNotice: (notice) => {
                         if (!isCurrentGeneration()) return;
                         persistToolNotice(notice);
                     },
-                    onToolResult: (content) => {
+                    onToolResult: (content, options) => {
                         if (!isCurrentGeneration()) return;
                         // Persist to history for future LLM context, hidden from UI
-                        persistHiddenToolResult(content);
+                        persistHiddenToolResult(content, options?.toolExecutionId);
                     },
-                    onToolAssistantTurn: (content) => {
+                    onToolAssistantTurn: (content, options) => {
                         if (!isCurrentGeneration()) return;
-                        persistHiddenAssistantToolTurn(content);
+                        persistHiddenAssistantToolCall(content, options);
                     },
                     onNativeToolAssistantTurn: async ({ content, rawContent, reasoning, openRouterReasoningDetails, toolCalls }) => {
                         if (!isCurrentGeneration()) return;
@@ -3294,7 +3576,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         // bubbles. The native tool-call metadata then rides on a separate
                         // empty carrier message — mirroring the group-chat path above.
                         if (content.trim()) {
-                            await splitAndSaveAIMessages(content, generationGuard);
+                            await splitAndSaveAIMessages(content, { ...generationGuard, reasoningText: reasoning });
                         }
                         if (!isCurrentGeneration()) return;
                         const carrier = pushChatMessage({
@@ -3309,21 +3591,22 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         setMessages(prev => [...prev, carrier]);
                         trackNativeToolCalls(session.id, generationRunId, toolCalls.map(call => ({ id: call.id, name: call.name })));
                     },
-                    onNativeToolResult: ({ toolCallId, name, content }) => {
+                    onNativeToolResult: ({ toolCallId, name, content, toolExecutionId }) => {
                         if (!isCurrentGeneration()) return;
                         const msg = pushChatMessage({
                             sessionId: session.id,
                             role: "tool",
                             content,
                             mediaType: "tool_result",
+                            toolExecutionId,
                             nativeToolResult: { toolCallId, name, content },
                         });
                         setMessages(prev => [...prev, msg]);
                         resolveNativeToolCall(session.id, generationRunId, toolCallId);
                     },
-                    onToolExecution: (results) => {
+                    onToolExecution: (results, _historyContent, options) => {
                         if (!isCurrentGeneration()) return;
-                        handleToolExecution(results, generationGuard);
+                        handleToolExecution(results, generationGuard, options?.toolExecutionId);
                     },
                 });
                 if (!isCurrentGeneration()) return;
@@ -3350,18 +3633,25 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             });
             setMessages(prev => [...prev, errorMsg]);
         } finally {
-            if (!finishGenerationRun(session.id, generationRunId)) return;
-            isGeneratingRef.current = false;
-            setIsGenerating(false);
-            clearGenerationLock(session.id);
-            if (!mountedRef.current) {
-                window.dispatchEvent(new CustomEvent(CHAT_BG_COMPLETE, { detail: { sessionId: session.id } }));
-            }
-            // If user sent more messages while AI was generating, show the generate button again
-            const latestMsgs = loadChatMessages(session.id);
-            const last = latestMsgs[latestMsgs.length - 1];
-            if (last && last.role === "user") {
-                setPendingGenerate(true);
+            if (finishGenerationRun(session.id, generationRunId)) {
+                isGeneratingRef.current = false;
+                setIsGenerating(false);
+                clearGenerationLock(session.id);
+                if (!mountedRef.current) {
+                    window.dispatchEvent(new CustomEvent(CHAT_BG_COMPLETE, { detail: { sessionId: session.id } }));
+                }
+                // If user sent more messages while AI was generating, show the generate button again
+                const latestMsgs = loadChatMessages(session.id);
+                const last = latestMsgs[latestMsgs.length - 1];
+                if (last && last.role === "user") {
+                    setPendingGenerate(true);
+                }
+            } else if (!activeGenerationRuns.has(session.id)) {
+                // 本轮被外部取消且没有新一轮接手：仍需复位，否则「生成中」标记永久卡死，
+                // 后续联动/追问的回复请求会被静默吞掉
+                isGeneratingRef.current = false;
+                setIsGenerating(false);
+                clearGenerationLock(session.id);
             }
         }
         if (shouldRunDeclineReply) await triggerReply();
@@ -3373,6 +3663,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 sessionId?: string;
                 characterId?: string;
                 handled?: boolean;
+                busy?: boolean;
             }>).detail;
             const requestSessionId = typeof detail?.sessionId === "string" ? detail.sessionId : "";
             const requestCharacterId = typeof detail?.characterId === "string" ? detail.characterId : "";
@@ -3383,6 +3674,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
 
             if (detail) detail.handled = true;
             syncMessagesFromStorage();
+            // 真在生成中：如实告知调用方（避免记成「已生成回应」），本轮结束后 pendingGenerate 兜底
+            if (isGeneratingRef.current && activeGenerationRuns.has(session.id)) {
+                if (detail) detail.busy = true;
+                return;
+            }
             void triggerAIResponse();
         };
 
@@ -3417,8 +3713,6 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         // Cancel any pending follow-up for this session
         cancelFollowUp(session.id);
 
-        const currentText = trimmed;
-
         // If quoting a message, send as quote type
         const isQuoting = !!quotingMessage;
         const quoteData = quotingMessage ? {
@@ -3428,71 +3722,57 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         } : undefined;
         setQuotingMessage(null);
 
-        const newMsg = pushChatMessage({
-            sessionId: session.id,
-            role: "user",
-            content: currentText,
-            mediaType: isQuoting ? "quote" : undefined,
-            mediaData: isQuoting ? quoteData : undefined,
-        });
+        const commitSendText = (currentText: string) => {
+            // 掷骰子：整条消息就是骰子图标时，发骰子气泡（内容仅图标），
+            // 点数由系统旁白公布——避免结果挂在 user 消息上被角色模仿格式
+            const diceOnly = !isQuoting && isDiceOnlyMessage(currentText);
+            const diceFace = diceOnly ? rollChatDiceFace() : 0;
 
-        setMessages(prev => [...prev, newMsg]);
-        setPendingGenerate(true);
+            const newMsg = pushChatMessage({
+                sessionId: session.id,
+                role: "user",
+                content: currentText,
+                mediaType: diceOnly ? "dice" : isQuoting ? "quote" : undefined,
+                mediaData: diceOnly ? { diceFace } : isQuoting ? quoteData : undefined,
+            });
+
+            setMessages(prev => [...prev, newMsg]);
+            if (diceOnly) {
+                const diceAside = pushChatMessage({
+                    sessionId: session.id,
+                    role: "system",
+                    content: formatChatDiceResultMessage(diceFace),
+                });
+                setMessages(prev => [...prev, diceAside]);
+            }
+            setPendingGenerate(true);
+        };
+
+        // 聊天插件织入点 user.beforeSend：无插件时走原同步路径，
+        // 有插件时输入框先清空，改写/取消在异步续体里完成
+        if (getChatPluginHookBus().hasHandlers("user.beforeSend")) {
+            void runChatPluginTransform("user.beforeSend", {
+                text: trimmed,
+                sessionId: session.id,
+                isGroup: !!session.isGroup,
+                cancelled: false,
+            }).then(payload => {
+                if (payload.cancelled) return;
+                const finalText = typeof payload.text === "string" ? payload.text.trim() : trimmed;
+                if (finalText) commitSendText(finalText);
+            });
+        } else {
+            commitSendText(trimmed);
+        }
         return true;
     };
 
-    const formatOfflineTurnXml = useCallback((turn: ChatOfflineTurn): string => {
-        if (turn.rawText?.trim()) return turn.rawText.trim();
-        const summaryTag = turn.summaryTag?.trim() || "summary";
-        return [
-            "<content>",
-            turn.assistantContent,
-            "</content>",
-            `<${summaryTag}>`,
-            turn.summary,
-            `</${summaryTag}>`,
-        ].join("\n");
-    }, []);
+    // 线下 XML 构造与提示词查看器共用 lib/offline-prompt-builder（社区 #108），
+    // 保证「预览 = 真实发出的提示词」；此处仅包一层稳定引用。
+    const formatOfflineTurnXml = useCallback((turn: ChatOfflineTurn): string => formatOfflineTurnXmlShared(turn), []);
 
-    const buildOfflinePromptHistory = (turns: ChatOfflineTurn[], pendingUserContent: string): ChatMessage[] => {
-        const history: ChatMessage[] = [];
-        for (const turn of turns) {
-            const assistantAt = turn.createdAt;
-            const userAtMs = new Date(turn.createdAt).getTime() - 1;
-            const userAt = Number.isFinite(userAtMs) ? new Date(userAtMs).toISOString() : turn.createdAt;
-            if (turn.userContent.trim()) {
-                history.push({
-                    id: `${turn.id}_user`,
-                    sessionId: session.id,
-                    role: "user",
-                    content: turn.userContent,
-                    status: "sent",
-                    createdAt: userAt,
-                });
-            }
-            history.push({
-                id: `${turn.id}_assistant`,
-                sessionId: session.id,
-                role: "assistant",
-                content: formatOfflineTurnXml(turn),
-                status: "sent",
-                createdAt: assistantAt,
-                ...(session.isGroup ? { senderName: session.groupName || "群聊线下" } : {}),
-            });
-        }
-        if (pendingUserContent.trim()) {
-            history.push({
-                id: `offline_pending_${Date.now()}`,
-                sessionId: session.id,
-                role: "user",
-                content: pendingUserContent.trim(),
-                status: "sent",
-                createdAt: new Date().toISOString(),
-            });
-        }
-        return history;
-    };
-
+    const buildOfflinePromptHistory = (turns: ChatOfflineTurn[], pendingUserContent: string): ChatMessage[] =>
+        buildOfflinePromptHistoryShared(session, turns, pendingUserContent);
     const getOfflineCopyText = (turn: ChatOfflineTurn, role: OfflineActionTarget["role"]): string => {
         if (role === "user") return turn.userContent;
         return formatOfflineTurnXml(turn);
@@ -3649,6 +3929,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     summary: result.summary.trim(),
                     summaryTag: result.summaryTag,
                     rawText: result.rawText,
+                    reasoningText: result.reasoning,
                 });
                 setOfflineTurns(prev => [...prev, saved]);
             } catch (error: any) {
@@ -3763,6 +4044,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 summary: result.summary.trim(),
                 summaryTag: result.summaryTag,
                 rawText: result.rawText,
+                reasoningText: result.reasoning,
             });
             setOfflineTurns([...baseTurns, saved]);
         } catch (error: any) {
@@ -3809,7 +4091,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         setEditingResponseRoundId(null);
         setEditingResponseContent("");
         setEditingMessageId(msg.id);
-        setEditingContent(msg.content);
+        // 语音条的文字存在 mediaData.label 里，content 是空的
+        setEditingContent(msg.mediaType === "audio" ? (msg.mediaData?.label || msg.content) : msg.content);
         setActiveMessageId(null);
     };
 
@@ -3826,8 +4109,16 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         const nextContent = isEditingSystemInstruction
             ? editingContent.trim()
             : applyEditTextRegex(editingContent.trim(), placement, false);
-        editChatMessage(editingMessageId, nextContent);
-        setMessages(prev => prev.map(m => m.id === editingMessageId ? { ...m, content: nextContent } : m));
+        if (originalMessage?.mediaType === "audio") {
+            // 语音条的显示文字和 AI 上下文都读 mediaData.label，改 content 不生效；
+            // synthesizedFromText 保留旧值，AI 语音会因文字不一致自动重新合成
+            const nextMediaData = { ...originalMessage.mediaData, label: nextContent };
+            updateMessageMediaData(editingMessageId, nextMediaData);
+            setMessages(prev => prev.map(m => m.id === editingMessageId ? { ...m, mediaData: nextMediaData } : m));
+        } else {
+            editChatMessage(editingMessageId, nextContent);
+            setMessages(prev => prev.map(m => m.id === editingMessageId ? { ...m, content: nextContent } : m));
+        }
         setEditingMessageId(null);
         setEditingContent("");
         const ta = document.querySelector<HTMLTextAreaElement>(".chat-input-textarea");
@@ -3965,6 +4256,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 statusPanel?: string;
                 innerMonologue?: string;
                 stateValues?: StateValue[];
+                freshStateValues?: StateValue[];
                 senderCharacterId?: string;
                 senderName?: string;
             }> = [];
@@ -3979,28 +4271,32 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             };
             for (const segment of segments) {
                 const responseBatchId = createResponseBatchId();
-                const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(segment.responseText, getCurrentStateForCharacter(segment.characterId));
+                const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(segment.responseText, getCurrentStateForCharacter(segment.characterId));
+                const parts = stripInvalidStickerParts(rawParts, segment.characterId);
                 const normalizedParts = normalizeEditedAssistantParts(parts, segment.characterName, {
                     omitHandledFinancialActions: true,
                 });
                 let attachedState = false;
                 for (const part of normalizedParts) {
                     if (!part.content.trim() && !part.mediaType && (!(statusPanel || innerMonologue) || attachedState)) continue;
+                    // 面板只挂到能显示它的正常气泡上（拍一拍/通话留痕是系统小字）
+                    const attachHere = !attachedState && canCarryFoldedPanel(part);
                     replacementMessages.push({
                         content: part.content,
                         mediaType: part.mediaType,
                         mediaData: part.mediaData,
                         rawResponseText: segment.responseText,
                         responseBatchId,
-                        statusPanel: !attachedState && statusPanel ? statusPanel : undefined,
-                        innerMonologue: !attachedState && innerMonologue ? innerMonologue : undefined,
-                        stateValues: !attachedState && stateValues.length > 0 ? stateValues : undefined,
+                        statusPanel: attachHere && statusPanel ? statusPanel : undefined,
+                        innerMonologue: attachHere && innerMonologue ? innerMonologue : undefined,
+                        stateValues: attachHere && stateValues.length > 0 ? stateValues : undefined,
+                        freshStateValues: attachHere ? freshStateValues : undefined,
                         senderCharacterId: segment.characterId,
                         senderName: segment.characterName,
                     });
-                    attachedState = true;
+                    if (attachHere) attachedState = true;
                 }
-                if (!attachedState && (statusPanel || innerMonologue)) {
+                if (!attachedState && (statusPanel || innerMonologue || stateValues.length > 0)) {
                     replacementMessages.push({
                         content: "",
                         rawResponseText: segment.responseText,
@@ -4008,10 +4304,21 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         statusPanel,
                         innerMonologue,
                         stateValues: stateValues.length > 0 ? stateValues : undefined,
+                        freshStateValues,
                         senderCharacterId: segment.characterId,
                         senderName: segment.characterName,
                     });
                     attachedState = true;
+                }
+                const toolCallContent = extractTextToolDirectiveText(segment.responseText);
+                if (toolCallContent) {
+                    replacementMessages.push({
+                        content: toolCallContent,
+                        mediaType: "tool_call",
+                        responseBatchId,
+                        senderCharacterId: segment.characterId,
+                        senderName: segment.characterName,
+                    });
                 }
                 if (stateValues.length > 0) {
                     currentStateByCharacter.set(segment.characterId, stateValues);
@@ -4060,7 +4367,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             ? getLatestStateValues(session.id)
             : getLatestCharacterStateValues(session.contactId, stateCutoff ? { before: stateCutoff } : undefined);
 
-        const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(editedResponseContent, previousState);
+        const { parts: rawParts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(editedResponseContent, previousState);
+        const parts = stripInvalidStickerParts(rawParts);
         const normalizedParts = normalizeEditedAssistantParts(parts);
         if (normalizedParts.length === 0 && (statusPanel || innerMonologue)) {
             normalizedParts.push({ content: "" });
@@ -4068,6 +4376,17 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         if (normalizedParts.length === 0) {
             showChatToast("编辑后的回复没有可显示内容");
             return;
+        }
+        // 面板挂到第一条能显示它的消息上（编辑后第一条可能是拍一拍或通话留痕，
+        // 那类系统小字不显示面板）；全是系统样式时补空消息驮面板
+        let metaPartIndex = normalizedParts.findIndex(canCarryFoldedPanel);
+        if (metaPartIndex === -1) {
+            if (statusPanel || innerMonologue || stateValues.length > 0) {
+                normalizedParts.push({ content: "" });
+                metaPartIndex = normalizedParts.length - 1;
+            } else {
+                metaPartIndex = 0;
+            }
         }
 
         replaceResponseBatchWithParts(
@@ -4079,6 +4398,9 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 statusPanel,
                 innerMonologue,
                 stateValues: stateValues.length > 0 ? stateValues : undefined,
+                freshStateValues,
+                metaPartIndex,
+                toolCallContent: extractTextToolDirectiveText(editedResponseContent),
             },
         );
         syncMessagesFromStorage();
@@ -4281,6 +4603,25 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     <button onClick={() => handleDeleteMessage(m.id)} className="ctx-menu-btn ctx-menu-btn-danger">删除</button>
                     <button onClick={() => handleDeleteMessagesFrom(m.id)} className="ctx-menu-btn ctx-menu-btn-danger">删除以下</button>
                 </div>
+                {(() => {
+                    // 聊天插件注册的消息操作菜单项
+                    const pluginActions = getChatPluginRuntime().getMessageActions(m);
+                    if (pluginActions.length === 0) return null;
+                    return (
+                        <div className="flex">
+                            {pluginActions.map(action => (
+                                <button
+                                    key={`${action.pluginId}:${action.id}`}
+                                    className="ctx-menu-btn"
+                                    onClick={() => {
+                                        getChatPluginRuntime().runMessageAction(action, m);
+                                        setActiveMessageId(null);
+                                    }}
+                                >{action.label}</button>
+                            ))}
+                        </div>
+                    );
+                })()}
                 <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
             </div>
         );
@@ -4445,24 +4786,57 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             }
             const parsed = parseAIResponse(displayRaw, []);
             const parts = normalizeDisplayParts(parsed.parts);
+            // 面板投影到第一条能显示它的消息上（拍一拍/通话留痕是系统小字，没有面板入口）
+            const displayMetaIdx = parts.findIndex(canCarryFoldedPanel);
+            const storedMeta = batch.find(m => m.statusPanel || m.innerMonologue || m.reasoningText || (m.stateValues && m.stateValues.length > 0));
+            let metaProjected = false;
             parts.forEach((part, index) => {
                 const base = batch[Math.min(index, batch.length - 1)] || batch[0];
                 if (!base) return;
                 const sourceId = base.id;
                 const id = index < batch.length ? sourceId : `${batch[0].id}__display_${index}`;
+                const isMetaSlot = index === displayMetaIdx;
+                const statusPanelHere = isMetaSlot ? (parsed.statusPanel || storedMeta?.statusPanel) : undefined;
+                const innerMonologueHere = isMetaSlot ? (parsed.innerMonologue || storedMeta?.innerMonologue) : undefined;
+                const reasoningTextHere = isMetaSlot ? storedMeta?.reasoningText : undefined;
+                const stateValuesHere = isMetaSlot ? storedMeta?.stateValues : undefined;
+                const freshStateValuesHere = isMetaSlot ? storedMeta?.freshStateValues : undefined;
+                if (isMetaSlot && (statusPanelHere || innerMonologueHere || reasoningTextHere || (stateValuesHere && stateValuesHere.length > 0))) {
+                    metaProjected = true;
+                }
+                // 语音条的 mediaData 里存着播放必需的状态（synthesizedFromText/voiceDuration），
+                // 直接用重解析结果整体替换会把它们丢掉，导致气泡永远判定"待重合成"而点不响。
+                // 双方都是语音条时按存储值打底、重解析字段覆盖。
+                const mediaData = part.mediaType === "audio" && base.mediaType === "audio" && base.mediaData
+                    ? { ...base.mediaData, ...part.mediaData }
+                    : part.mediaData;
                 projected.push({
                     ...base,
                     id,
                     content: part.content,
                     mediaType: part.mediaType,
-                    mediaData: part.mediaData,
-                    statusPanel: index === 0 && parsed.statusPanel ? parsed.statusPanel : (index < batch.length ? base.statusPanel : undefined),
-                    innerMonologue: index === 0 && parsed.innerMonologue ? parsed.innerMonologue : (index < batch.length ? base.innerMonologue : undefined),
-                    stateValues: index === 0 ? base.stateValues : undefined,
+                    mediaData,
+                    statusPanel: statusPanelHere,
+                    innerMonologue: innerMonologueHere,
+                    reasoningText: reasoningTextHere,
+                    stateValues: stateValuesHere,
+                    freshStateValues: freshStateValuesHere,
                     displayProjected: true,
                     displaySourceId: sourceId,
                 });
             });
+            // 投影后没有任何消息驮面板（比如整段只剩拍一拍/通话留痕）→ 补一条空投影消息
+            if (!metaProjected && storedMeta) {
+                projected.push({
+                    ...storedMeta,
+                    id: `${batch[0].id}__display_meta`,
+                    content: "",
+                    mediaType: undefined,
+                    mediaData: undefined,
+                    displayProjected: true,
+                    displaySourceId: storedMeta.id,
+                });
+            }
         }
         return projected;
     }, [dedupedMessages, normalizeDisplayParts, renderDisplayText]);
@@ -4728,8 +5102,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         <div ref={wrapperRef} className={`session-${session.id} chat-room-wrapper page-shell inset-0 flex flex-col z-20`} style={chatRoomBackgroundStyle} {...(bgLoading ? { "data-loading": "" } : {})} {...(bgImageResolved ? { "data-has-bg-image": "" } : {})} {...(showSettings ? { "data-settings-open": "" } : {})}>
             {/* Custom CSS Injection for this session — scoped to prevent leaking */}
             {liveCSS && (
-                <style dangerouslySetInnerHTML={{ __html: scopeSessionCSS(liveCSS, `.session-${session.id}`) }} />
+                <SessionCustomCSS css={liveCSS} scope={`.session-${session.id}`} />
             )}
+
+            {/* 全屏特效层（表情雨/礼花），不拦截任何触摸操作 */}
+            <ChatScreenEffectOverlay active={activeScreenEffect} onDone={() => setActiveScreenEffect(null)} />
             {/* Header */}
             <header className="page-header chat-room-main-pane" data-ui="header">
                 <div className="page-header-safe-area" />
@@ -4839,6 +5216,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             </span>
                 </div>
             </header>
+<ChatPluginSlot
+                name="chat.header"
+                slotProps={{ sessionId: session.id, isGroup: !!session.isGroup }}
+                className="chat-plugin-header chat-room-main-pane"
+            />
 
             {/* Message List */}
             <div
@@ -4884,6 +5266,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             {showTime && <div className="chat-offline-time">{formatChatUiTime(turn.createdAt)}</div>}
                             <div className="chat-offline-turn">
                                 <div className="chat-offline-entry" data-role="user" style={offlineDisplay.userContent.trim() ? undefined : { display: "none" }}>
+                                    {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
+                                    <div className="chat-offline-avatar" aria-hidden="true">
+                                        {userIdentity?.avatarUrl ? <img src={userIdentity.avatarUrl} alt="" /> : <User size={18} color="var(--c-text)" />}
+                                    </div>
                                     <div className="chat-offline-label">你</div>
                                     <div
                                         className="chat-offline-text"
@@ -4910,6 +5296,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                     </div>
                                 </div>
                                 <div className="chat-offline-entry" data-role="assistant">
+                                    {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
+                                    <div className="chat-offline-avatar" aria-hidden="true">
+                                        {character?.avatar ? <img src={character.avatar} alt="" /> : <ChatFallbackAvatar />}
+                                    </div>
                                     <div className="chat-offline-label-row">
                                         <div className="chat-offline-label">{session.isGroup ? (session.groupName || "群聊") : (character?.name || "对方")}</div>
                                         {assistantHasHtmlPreview ? (
@@ -4936,6 +5326,19 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                             </button>
                                         ) : null}
                                     </div>
+                                    {/* 思维链触发条（线下模式，Claude app 风格） */}
+                                    {turn.reasoningText && (
+                                        <button
+                                            type="button"
+                                            className="chat-reasoning-trigger"
+                                            onClick={(e) => { e.stopPropagation(); setReasoningSheetText(turn.reasoningText || null); }}
+                                            aria-label="查看思考过程"
+                                        >
+                                            <Clock size={13} strokeWidth={1.8} className="chat-reasoning-trigger-icon" />
+                                            <span className="chat-reasoning-trigger-text">{reasoningPreviewLine(turn.reasoningText)}</span>
+                                            <ChevronRight size={14} strokeWidth={1.8} className="chat-reasoning-trigger-icon" />
+                                        </button>
+                                    )}
                                     <div
                                         className="chat-offline-text"
                                         onPointerDown={(e) => { e.stopPropagation(); handleOfflinePointerDown(e, { turnId: turn.id, role: "assistant" }); }}
@@ -4978,6 +5381,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                         {(pendingOfflineUserText || isOfflineGenerating) && (
                             <div className="chat-offline-turn">
                                 <div className="chat-offline-entry" data-role="user" style={pendingOfflineUserText ? undefined : { display: "none" }}>
+                                    {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
+                                    <div className="chat-offline-avatar" aria-hidden="true">
+                                        {userIdentity?.avatarUrl ? <img src={userIdentity.avatarUrl} alt="" /> : <User size={18} color="var(--c-text)" />}
+                                    </div>
                                     <div className="chat-offline-label">你</div>
                                     <div className="chat-offline-text">
                                         <BilingualTextBlock
@@ -5147,6 +5554,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     const isVisualMedia = isChatVisualMedia(renderMsg);
                     const hiddenEmpty = isHiddenChatFlowMessage(renderMsg, bubbleDisplayContent);
                     const hasFoldedPanel = !!(renderMsg.statusPanel || renderMsg.innerMonologue);
+                    // 内心卡片只展示本轮实际输出的状态值；旧数据没有 freshStateValues 时回退到合并快照
+                    const cardStateValues = msg.freshStateValues ?? msg.stateValues;
                     const isSilentThought = !visibleContent && !renderMsg.mediaType && hasFoldedPanel && msg.role !== "user";
                     const isStandaloneHtmlPreview = !renderMsg.mediaType && isStandaloneHtmlPreviewContent(bubbleDisplayContent);
                     const isMediaBubble = (renderMsg.mediaType && CHAT_MEDIA_BUBBLE_TYPES.has(renderMsg.mediaType)) || isStandaloneHtmlPreview;
@@ -5166,7 +5575,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     } : {};
 
                     return (
-                        <div key={msg.id} className="flex flex-col gap-4" {...(hiddenEmpty ? { style: { display: "none" } } : {})}>
+                        <div key={msg.id} className="flex flex-col gap-4" {...(hiddenEmpty ? { style: { display: "none" } } : {})} {...(isEmptyBubble && renderMsg.reasoningText && !showTime ? { "data-reasoning-only": "" } : {})}>
                             {showTime && (
                                 <div className="flex justify-center w-full">
                                     <span className="chat-sys-msg py-[2px] px-2 rounded select-none">
@@ -5174,10 +5583,27 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                     </span>
                                 </div>
                             )}
+                            {/* 思维链触发条（Claude app 风格）：点击打开底部弹窗 */}
+                            {renderMsg.reasoningText && msg.role !== "user" && uiRole(msg) !== "system" && (
+                                <div className="chat-msg-wrapper" data-role={uiRole(msg)} data-reasoning-row="" style={{ marginBottom: -8 }}>
+                                    <div className="w-[40px] shrink-0" />
+                                    <button
+                                        type="button"
+                                        className="chat-reasoning-trigger"
+                                        onClick={(e) => { e.stopPropagation(); setReasoningSheetText(renderMsg.reasoningText || null); }}
+                                        aria-label="查看思考过程"
+                                    >
+                                        <Clock size={13} strokeWidth={1.8} className="chat-reasoning-trigger-icon" />
+                                        <span className="chat-reasoning-trigger-text">{reasoningPreviewLine(renderMsg.reasoningText)}</span>
+                                        <ChevronRight size={14} strokeWidth={1.8} className="chat-reasoning-trigger-icon" />
+                                    </button>
+                                </div>
+                            )}
                             <div
                                 id={`message-${msg.id}`}
                                 className="chat-msg-wrapper"
                                 data-role={uiRole(msg)}
+                                {...(isEmptyBubble && renderMsg.reasoningText ? { "data-reasoning-empty": "" } : {})}
                                 {...(isConsecutive ? { "data-consecutive": "" } : {})}
                                 {...(activeMessageId === msg.id ? { "data-active": "" } : {})}
                                 {...(highlightMessageId === msg.id ? { "data-highlight": "" } : {})}
@@ -5204,7 +5630,12 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
                                         className={isSystemInstruction
                                             ? "chat-system-instruction-card relative cursor-pointer"
-                                            : "chat-sys-msg break-all max-w-[90%] relative cursor-pointer"}
+                                            : `chat-sys-msg break-all max-w-[90%] relative cursor-pointer${
+                                                // 骰子旁白：等骰子落定再淡入，避免剧透点数
+                                                msg.content.startsWith("🎲 掷出了") && Date.now() - new Date(msg.createdAt).getTime() < 6000
+                                                    ? " dice-aside-reveal"
+                                                    : ""
+                                            }`}
                                         {...(activeMessageId === msg.id ? { "data-active": "" } : {})}
                                     >
                                         {isSystemInstruction ? (
@@ -5411,8 +5842,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                         💭 {renderMsg.innerMonologue ? "内心独白" : "状态栏"}
                                     </div>
                                     {/* State values panel */}
-                                    {msg.stateValues && msg.stateValues.length > 0 && (
-                                        <StateValuesPanel stateValues={msg.stateValues} />
+                                    {cardStateValues && cardStateValues.length > 0 && (
+                                        <StateValuesPanel stateValues={cardStateValues} />
                                     )}
                                     {renderMsg.statusPanel && (
                                         <div className="chat-thought-body">
@@ -5718,6 +6149,70 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     }}
                     onClose={() => setRichModal(null)}
                 />
+            )}
+
+            {/* 思维链底部弹窗（Claude app 风格） */}
+            {reasoningSheetText !== null && (
+                <div
+                    className="modal-overlay modal-overlay-bottom"
+                    data-ui="modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="思考过程"
+                    onClick={() => setReasoningSheetText(null)}
+                >
+                    <div className="modal-sheet chat-reasoning-sheet" onClick={(e) => e.stopPropagation()}>
+                        <div className="chat-reasoning-sheet-handle" />
+                        <div className="chat-reasoning-sheet-header">
+                            <button
+                                type="button"
+                                className="chat-reasoning-sheet-close"
+                                onClick={handleTranslateReasoning}
+                                aria-label={reasoningTranslation ? "隐藏译文" : "翻译思考过程"}
+                                title={reasoningTranslation ? "隐藏译文" : "翻译思考过程"}
+                            >
+                                {reasoningTranslating
+                                    ? <Loader2 size={18} strokeWidth={2} className="animate-spin" />
+                                    : <Languages size={18} strokeWidth={2} {...(reasoningTranslation ? { color: "var(--c-icon-active)" } : {})} />}
+                            </button>
+                            <span className="chat-reasoning-sheet-title">思考过程</span>
+                            <button
+                                type="button"
+                                className="chat-reasoning-sheet-close"
+                                onClick={() => setReasoningSheetText(null)}
+                                aria-label="关闭"
+                            >
+                                <X size={18} strokeWidth={2} />
+                            </button>
+                        </div>
+                        <div className="chat-reasoning-sheet-body">
+                            {reasoningTranslateError && (
+                                <div className="chat-reasoning-translate-error">{reasoningTranslateError}</div>
+                            )}
+                            {reasoningTranslation && (
+                                <div className="chat-reasoning-view-switch">
+                                    {([["zh", "中文"], ["orig", "原文"], ["both", "对照"]] as const).map(([mode, text]) => (
+                                        <button
+                                            key={mode}
+                                            type="button"
+                                            className="chat-reasoning-view-btn"
+                                            {...(reasoningViewMode === mode ? { "data-active": "" } : {})}
+                                            onClick={() => setReasoningViewMode(mode)}
+                                        >{text}</button>
+                                    ))}
+                                </div>
+                            )}
+                            {reasoningTranslation && reasoningViewMode !== "orig" && (
+                                <div className={reasoningViewMode === "both" ? "chat-reasoning-translation" : undefined}>
+                                    <BilingualTextBlock text={reasoningTranslation} mode="markdown" defaultExpanded />
+                                </div>
+                            )}
+                            {(reasoningViewMode !== "zh" || !reasoningTranslation) && (
+                                <BilingualTextBlock text={reasoningSheetText} mode="markdown" defaultExpanded />
+                            )}
+                        </div>
+                    </div>
+                </div>
             )}
 
             {/* Red Packet / Transfer Detail Modal */}

@@ -18,6 +18,7 @@ import { useCallKeyboardOffsetStyle } from "./use-call-keyboard-offset";
 import { CallSttWarningDialog, hideCallSttWarningPermanently, isCallSttWarningHidden } from "./call-stt-warning-dialog";
 import { isAndroidBrowser } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
+import { startIncomingCallVibration } from "@/lib/call-vibration";
 
 // ── Types ───────────────────────────────────────────
 
@@ -81,6 +82,13 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     // Keep refs in sync
     useEffect(() => { stateRef.current = callState; }, [callState]);
+
+    // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
+    useEffect(() => {
+        if (initiator !== "character" || callState !== "CONNECTING") return;
+        const stop = startIncomingCallVibration();
+        return stop;
+    }, [initiator, callState]);
 
     // Pause WeChat keep-alive while the call holds the mic/audio; restore on exit.
     useEffect(() => {
@@ -225,7 +233,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         // Use shared parseAIResponse for full rich media support (stickers, quotes, etc.)
         const previousState = getLatestCharacterStateValues(session.contactId);
 
-        const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
+        const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
 
         // Filter out non-chat action types (voice_call, video_call, poke, etc.)
         const chatParts = parts.filter(p =>
@@ -241,6 +249,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 statusPanel,
                 innerMonologue,
                 stateValues: stateValues.length > 0 ? stateValues : undefined,
+                freshStateValues,
             });
             messagesRef.current = [...messagesRef.current, aiMsg];
         } else {
@@ -254,6 +263,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
                     innerMonologue: idx === 0 && innerMonologue ? innerMonologue : undefined,
                     stateValues: idx === 0 && stateValues.length > 0 ? stateValues : undefined,
+                    freshStateValues: idx === 0 ? freshStateValues : undefined,
                 })
             );
             messagesRef.current = [...messagesRef.current, ...newMsgs];

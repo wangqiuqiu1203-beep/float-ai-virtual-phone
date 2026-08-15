@@ -15,6 +15,7 @@ import type { Character } from "@/lib/character-types";
 import { useCallKeyboardOffsetStyle } from "./use-call-keyboard-offset";
 import { isAndroidBrowser } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
+import { startIncomingCallVibration } from "@/lib/call-vibration";
 
 // ── Types ───────────────────────────────────────────
 
@@ -121,6 +122,13 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
     // Keep refs in sync
     useEffect(() => { stateRef.current = callState; }, [callState]);
+
+    // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
+    useEffect(() => {
+        if (initiator !== "character" || callState !== "CONNECTING") return;
+        const stop = startIncomingCallVibration();
+        return stop;
+    }, [initiator, callState]);
     useEffect(() => { interimTextRef.current = interimText; }, [interimText]);
 
     // Scroll subtitles to bottom
@@ -217,7 +225,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             for (const r of results) {
                 if (stateRef.current === "ENDED") return;
 
-                const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(
+                const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(
                     r.responseText,
                     getLatestCharacterStateValues(r.characterId),
                 );
@@ -233,6 +241,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                     statusPanel: statusPanel || undefined,
                     innerMonologue: innerMonologue || undefined,
                     stateValues: stateValues.length > 0 ? stateValues : undefined,
+                    freshStateValues,
                     senderCharacterId: r.characterId,
                     senderName: r.characterName,
                 });

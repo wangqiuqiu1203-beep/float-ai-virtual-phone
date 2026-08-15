@@ -22,7 +22,8 @@ import {
     toolNameMatches,
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
-import { CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
+import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
 import type { MemoryEntry } from "./memory-types";
 import { loadCharacters } from "./character-storage";
@@ -41,6 +42,7 @@ import {
     isCalendarTimeRangeAllowed,
     normalizeTime,
     parseIsoDate,
+    sanitizeScheduleEmoji,
     sortScheduleItems,
 } from "./calendar-utils";
 import type { NoteWallBoard, NoteWallComment, NoteWallNote, NoteWallSize } from "./notewall-types";
@@ -746,6 +748,7 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     if (isLocalDataToolName(call.name)) return executeLocalDataTool(call);
     if (isToolboxManagementToolName(call.name)) return executeToolboxManagementTool(call);
     if (call.name === "发送文件") return executeSendFileTool(call);
+    if (call.name === "角色电脑") return executeAgentComputerTool(call, context);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
     if (call.name !== "写入记忆") return null;
@@ -1803,13 +1806,14 @@ function parseCalendarDraft(args: Record<string, unknown>): CalendarDraftParseRe
     const startTime = normalizeTime(cleanToolString(args.startTime ?? args.start_time ?? args.start, 16));
     const endTime = normalizeTime(cleanToolString(args.endTime ?? args.end_time ?? args.end, 16));
     if (!startTime || !endTime || !isCalendarTimeRangeAllowed(startTime, endTime)) {
-        return { ok: false, error: "时间无效，需使用 HH:MM 且范围在 08:00-23:00", notice: "日程时间无效" };
+        return { ok: false, error: "时间无效，需使用 HH:MM 且开始时间早于结束时间", notice: "日程时间无效" };
     }
 
     const title = cleanToolString(args.title ?? args.task ?? args.content, 120);
     if (!title) return { ok: false, error: "缺少 title 参数", notice: "日程事项为空" };
 
     const location = cleanToolString(args.location ?? args.place, 80) || "无";
+    const emoji = sanitizeScheduleEmoji(cleanToolString(args.emoji ?? args.icon, 16));
     return {
         ok: true,
         item: {
@@ -1818,6 +1822,7 @@ function parseCalendarDraft(args: Record<string, unknown>): CalendarDraftParseRe
             endTime,
             location,
             title,
+            emoji,
             source: "generated",
         },
     };
@@ -1895,6 +1900,7 @@ function formatCalendarItemForTool(item: CalendarScheduleItem): Record<string, u
         endTime: item.endTime,
         location: item.location,
         title: item.title,
+        emoji: item.emoji || "",
         source: item.source,
     };
 }
@@ -1917,6 +1923,112 @@ function calendarToolFailure(name: string, error: string, userNotice: string): T
 function dispatchCalendarUpdated(): void {
     if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("calendar-updated"));
+    }
+}
+
+// ── 角色电脑（角色自己的云端小电脑）───────────────
+
+function agentComputerMimeFor(path: string): string {
+    const ext = path.split(".").pop()?.toLowerCase() || "";
+    const map: Record<string, string> = {
+        png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+        mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4",
+        mp4: "video/mp4", webm: "video/webm",
+        txt: "text/plain", md: "text/markdown", json: "application/json", html: "text/html",
+    };
+    return map[ext] || "application/octet-stream";
+}
+
+async function executeAgentComputerTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const failed = (error: string, userNotice?: string): ToolResult => ({
+        name: call.name, success: false, error, continueConversation: false, persistToHistory: false, userNotice,
+    });
+    const capability = getInternalCapability(AGENT_COMPUTER_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") return failed("角色电脑能力未启用");
+    if (!isAgentComputerConfigured()) return failed("角色电脑尚未连接（设置 → 角色电脑）");
+    if (!isSupportedChatToolContext(context)) return failed("当前场景暂不支持角色电脑");
+
+    const workspace = characterWorkspace(context.characterId);
+    const args = call.args || {};
+    const op = String(args.op ?? "").trim();
+    const path = String(args.path ?? "").trim();
+    const baseName = path.split("/").pop() || path;
+
+    try {
+        if (op === "write") {
+            const content = String(args.content ?? "");
+            if (!path) return failed("缺少 path");
+            if (!content) return failed("缺少 content");
+            await agentComputerRequest("write", workspace, { path, content });
+            return {
+                name: call.name, success: true,
+                data: `已写入自己电脑：${path}（${content.length} 字符）`,
+                continueConversation: true, persistToHistory: false,
+                userNotice: `📂 在自己的电脑上写下了《${baseName}》`,
+            };
+        }
+        if (op === "read") {
+            if (!path) return failed("缺少 path");
+            const data = await agentComputerRequest<{ content: string; truncated: boolean }>("read", workspace, { path, maxChars: 20000 });
+            return {
+                name: call.name, success: true,
+                data: `${path} 的内容：\n${data.content}${data.truncated ? "\n…（已截断）" : ""}`,
+                continueConversation: true, persistToHistory: false,
+            };
+        }
+        if (op === "list") {
+            const data = await agentComputerRequest<{ entries: Array<{ name: string; dir: boolean }> }>("list", workspace, { path: path || "/" });
+            const listing = data.entries.length
+                ? data.entries.map(entry => `${entry.dir ? "[目录]" : "[文件]"} ${entry.name}`).join("\n")
+                : "（空目录）";
+            return {
+                name: call.name, success: true,
+                data: `${path || "/"} 下：\n${listing}`,
+                continueConversation: true, persistToHistory: false,
+            };
+        }
+        if (op === "send") {
+            if (!path) return failed("缺少 path");
+            const data = await agentComputerRequest<{ base64: string }>("read_base64", workspace, { path });
+            const mime = agentComputerMimeFor(path);
+            const bytes = Uint8Array.from(atob(data.base64), c => c.charCodeAt(0));
+            const type = inferMediaAttachmentType(path, baseName);
+            const url = await storeMediaBlob(new Blob([bytes], { type: mime }), mime, type);
+            return {
+                name: call.name, success: true,
+                data: `文件已发送：${baseName}`,
+                continueConversation: true, persistToHistory: false,
+                mediaAttachments: [{ type, url, title: baseName }],
+            };
+        }
+        if (op === "exec") {
+            const command = String(args.command ?? "").trim();
+            if (!command) return failed("缺少 command");
+            try {
+                const data = await agentComputerRequest<{ exitCode: number; stdout: string; stderr: string }>(
+                    "exec", workspace, { command });
+                const parts = [`$ ${command}`, `退出码：${data.exitCode}`];
+                if (data.stdout) parts.push(`stdout：\n${data.stdout}`);
+                if (data.stderr) parts.push(`stderr：\n${data.stderr}`);
+                if (!data.stdout && !data.stderr) parts.push("（无输出）");
+                return {
+                    name: call.name, success: true,
+                    data: parts.join("\n"),
+                    continueConversation: true, persistToHistory: false,
+                    userNotice: `💻 在自己的电脑上运行了一条命令`,
+                };
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                if (/shell 不可用|execution backend/i.test(message)) {
+                    return failed("这台电脑是基础模式（没有 shell），改用 write / read / list 完成吧");
+                }
+                throw err;
+            }
+        }
+        return failed("op 需为 write / read / list / send / exec 之一");
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return failed(`角色电脑操作失败：${message}`);
     }
 }
 
@@ -3330,7 +3442,9 @@ async function mcpRequest(
     });
 
     if (res.status === 401) {
-        return { error: { code: 401, message: res.headers["www-authenticate"] || "Unauthorized" }, headers: res.headers };
+        // 把响应体带回去：401 可能来自应用登录网关、隧道/反代或 MCP 服务器本身，
+        // 上层靠 body + WWW-Authenticate 头才能区分并给出正确指引。
+        return { error: { code: 401, message: res.text.slice(0, 300) || "Unauthorized" }, headers: res.headers };
     }
 
     if (res.status < 200 || res.status >= 300) {
@@ -3353,6 +3467,23 @@ async function mcpRequest(
 }
 
 // ── MCP Initialize Handshake ──────────────────
+
+/**
+ * 401 分流：同一个状态码可能来自三个完全不同的地方，指错路会让用户在
+ * 「OAuth 授权」按钮上打转（服务器不支持 OAuth 时那条路是死胡同）。
+ */
+function describeMcpUnauthorized(wwwAuthenticate: string | undefined, bodyText: string): string {
+    // 托管部署下 middleware 对 /api/tool-proxy 的登录拦截——和 MCP 服务器无关
+    if (bodyText.includes("请先登录")) {
+        return "鉴权失败（401）：应用登录已过期，请刷新页面重新登录后再试（与 MCP 服务器配置无关）。";
+    }
+    // 标准 MCP OAuth 服务器会带 WWW-Authenticate 头，此时点授权按钮才是正解
+    if (wwwAuthenticate) {
+        return "需要 OAuth 授权。请在设置中点击「授权」按钮。";
+    }
+    return "鉴权失败（401）：Token 可能无效或已过期。本地工具类 MCP 通常不支持 OAuth，"
+        + "请在设置中检查「访问 Token」是否为最新值（这类工具重启后 token 会变化），不必点击授权按钮。";
+}
 
 async function mcpInitialize(server: McpServerConfig, signal?: AbortSignal): Promise<{ success: boolean; error?: string }> {
     throwIfAborted(signal);
@@ -3381,9 +3512,9 @@ async function mcpInitialize(server: McpServerConfig, signal?: AbortSignal): Pro
         clientInfo: MCP_CLIENT_INFO,
     }, authHeaders, false, useSse, signal);
 
-    // Handle 401 — needs OAuth
+    // Handle 401 — 按来源分流：应用登录网关 / 真 OAuth 服务器 / Token 失效
     if (initRes.error?.code === 401) {
-        return { success: false, error: "需要 OAuth 授权。请在设置中点击「授权」按钮。" };
+        return { success: false, error: describeMcpUnauthorized(initRes.headers["www-authenticate"], initRes.error.message) };
     }
 
     if (initRes.error) {
@@ -3458,10 +3589,15 @@ async function ensureTokenFresh(server: McpServerConfig, signal?: AbortSignal): 
     }
 }
 
+/** 用户常把 "Bearer xxx" 整段粘进 Token 栏，发出去会变成 "Bearer Bearer xxx"——这里兜底剥掉前缀。 */
+function bearerAuthValue(accessToken: string): string {
+    return `Bearer ${accessToken.replace(/^bearer\s+/i, "")}`;
+}
+
 function buildMcpAuthHeaders(server: McpServerConfig): Record<string, string> {
     const headers: Record<string, string> = cleanHeaders(server.headers);
     if (server.accessToken) {
-        headers["Authorization"] = `Bearer ${server.accessToken}`;
+        headers["Authorization"] = bearerAuthValue(server.accessToken);
     }
     return headers;
 }
@@ -3469,7 +3605,7 @@ function buildMcpAuthHeaders(server: McpServerConfig): Record<string, string> {
 function getMcpSessionHeaders(server: McpServerConfig): Record<string, string> {
     const headers: Record<string, string> = cleanHeaders(server.headers);
     if (server.sessionId) headers["Mcp-Session-Id"] = server.sessionId;
-    if (server.accessToken) headers["Authorization"] = `Bearer ${server.accessToken}`;
+    if (server.accessToken) headers["Authorization"] = bearerAuthValue(server.accessToken);
     return headers;
 }
 
@@ -3608,7 +3744,7 @@ async function resolveMcpOAuthMetadata(
         }
     }
 
-    throw new Error("无法发现 OAuth 授权端点");
+    throw new Error("无法发现 OAuth 授权端点——该服务器可能不支持 OAuth。若已有 Token，直接填入「访问 Token」即可，无需授权。");
 }
 
 function persistMcpOAuthState(server: McpServerConfig): void {

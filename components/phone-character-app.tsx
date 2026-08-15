@@ -40,7 +40,18 @@ import { loadMomentsConfig, saveMomentsConfig } from "@/lib/moments-storage";
 import type { CanvasBgItem } from "@/lib/character-types";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog } from "@/components/ui/modal";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, History } from "lucide-react";
+import {
+  backupCharacterVersion,
+  clearCharacterVersions,
+  deleteCharacterVersion,
+  getCharacterCurrentVersion,
+  getCharacterNextVersion,
+  loadCharacterVersions,
+  overwriteCharacterVersion,
+  switchCharacterVersion,
+  type CharacterVersion,
+} from "@/lib/character-version-storage";
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { kvGet, kvSet } from "@/lib/kv-db";
 import { normalizeTimeZone } from "@/lib/character-time";
@@ -258,6 +269,7 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
           <CharArchiveView
             char={view.id ? (characters.find((c) => c.id === view.id) ?? createCharacter({ name: "", persona: "", avatar: null })) : createCharacter({ name: "", persona: "", avatar: null })}
             isEditing={view.isEditing}
+            isExisting={Boolean(view.id)}
             onBack={handleBackFromDetail}
             onEdit={() => setView({ type: "detail", id: view.id, isEditing: true })}
             onCancelEdit={() => {
@@ -267,9 +279,12 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
                 setView({ type: "list", id: null, isEditing: false });
               }
             }}
-            onSave={(data) => {
+            onSave={(data, createVersion) => {
               const existing = view.id ? characters.find((c) => c.id === view.id) : null;
               if (existing) {
+                const nextVersion = createVersion
+                  ? backupCharacterVersion(existing, "manual", "手动编辑前备份")
+                  : overwriteCharacterVersion(existing.id);
                 const updated: Character = {
                   ...existing,
                   ...data,
@@ -277,7 +292,9 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
                 };
                 updateChars(characters.map((c) => (c.id === existing.id ? updated : c)));
                 setView({ type: "detail", id: existing.id, isEditing: false });
-                onNotice("档案已更新");
+                onNotice(createVersion
+                  ? `已备份旧卡，当前为 V${nextVersion}`
+                  : `已覆盖旧版本，当前为 V${nextVersion}`);
               } else {
                 const newChar = createCharacter(data);
                 newChar.polaroidStyle = pendingPolaroidStyle;
@@ -286,8 +303,23 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
                 onNotice("点击画布放置角色");
               }
             }}
+            onRestoreVersion={(version) => {
+              const existing = view.id ? characters.find((c) => c.id === view.id) : null;
+              if (!existing) return;
+              const activeVersion = switchCharacterVersion(existing, version);
+              const restored: Character = {
+                ...version.data,
+                id: existing.id,
+                createdAt: existing.createdAt,
+                updatedAt: new Date().toISOString(),
+              };
+              updateChars(characters.map((c) => (c.id === existing.id ? restored : c)));
+              setView({ type: "detail", id: existing.id, isEditing: false });
+              onNotice(`已切换到 V${activeVersion}，未创建新版本`);
+            }}
             onDelete={() => {
               if (view.id) {
+                clearCharacterVersions(view.id);
                 updateChars(characters.filter((c) => c.id !== view.id));
               }
               setView({ type: "list", id: null, isEditing: false });
@@ -616,6 +648,37 @@ function CharListView({
       setLinkFromId(null);
     }
     setIsEditing(!isEditing);
+  }
+
+  /** 恢复视角：把当前世界所有已放置的卡片/道具重新框进可视范围（卡片被拖出画面找不到时用） */
+  function resetViewToFit() {
+    const rect = canvasElRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return;
+    const points: { x: number; y: number }[] = [];
+    for (const c of worldCharacters) {
+      if (c.canvasX !== undefined) points.push({ x: c.canvasX, y: c.canvasY || 0 });
+    }
+    for (const b of worldBgItems) points.push({ x: b.x, y: b.y });
+    let next: { x: number; y: number; zoom: number };
+    if (points.length === 0) {
+      next = { x: 0, y: 0, zoom: 1 };
+    } else {
+      // 卡片以左上角定位，按最大卡片尺寸把包围盒补足，再留出边距
+      const ITEM_W = 170, ITEM_H = 240, PAD = 40;
+      const minX = Math.min(...points.map(p => p.x)) - PAD;
+      const minY = Math.min(...points.map(p => p.y)) - PAD;
+      const maxX = Math.max(...points.map(p => p.x)) + ITEM_W + PAD;
+      const maxY = Math.max(...points.map(p => p.y)) + ITEM_H + PAD;
+      const zoom = Math.min(1, Math.max(0.05, Math.min(rect.width / (maxX - minX), rect.height / (maxY - minY))));
+      next = {
+        x: rect.width / 2 - zoom * ((minX + maxX) / 2),
+        y: rect.height / 2 - zoom * ((minY + maxY) / 2),
+        zoom,
+      };
+    }
+    setPan(next);
+    try { kvSet(worldPanKey(currentWorldId), JSON.stringify(next)); } catch { }
+    onNotice("已恢复视角");
   }
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: string, type: 'char' | 'bg' } | null>(null);
   const [deleteConfirmReady, setDeleteConfirmReady] = useState(false);
@@ -1046,17 +1109,29 @@ function CharListView({
         }
         className="[&_.page-body]:pb-0"
         rightAction={
-          <button
-            className={`flex items-center justify-center w-[34px] h-[34px] rounded-full transition-colors ${
-              isEditing
-                ? 'bg-[#111111] text-white shadow-md'
-                : 'bg-black/5 text-[#666] hover:bg-black/10'
-            }`}
-            onClick={() => toggleEditing()}
-            aria-label="编辑排版"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
-          </button>
+          <div className="flex items-center gap-2">
+            {isEditing && (
+              <button
+                className="flex items-center justify-center w-[34px] h-[34px] rounded-full bg-black/5 text-[#666] hover:bg-black/10 transition-colors"
+                onClick={() => resetViewToFit()}
+                aria-label="恢复视角"
+                title="恢复视角"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M21 8V5a2 2 0 0 0-2-2h-3"></path><path d="M3 16v3a2 2 0 0 0 2 2h3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+              </button>
+            )}
+            <button
+              className={`flex items-center justify-center w-[34px] h-[34px] rounded-full transition-colors ${
+                isEditing
+                  ? 'bg-[#111111] text-white shadow-md'
+                  : 'bg-black/5 text-[#666] hover:bg-black/10'
+              }`}
+              onClick={() => toggleEditing()}
+              aria-label="编辑排版"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+            </button>
+          </div>
         }
         footer={
           <div className="char-bottom-bar flex justify-center pb-8">
@@ -1770,10 +1845,12 @@ function DraggableNode({
 function CharArchiveView({
   char,
   isEditing = false,
+  isExisting = false,
   onBack,
   onEdit,
   onCancelEdit,
   onSave,
+  onRestoreVersion,
   onDelete,
   onExportJson,
   onExportPng,
@@ -1781,10 +1858,12 @@ function CharArchiveView({
 }: {
   char: Character;
   isEditing?: boolean;
+  isExisting?: boolean;
   onBack: () => void;
   onEdit: () => void;
   onCancelEdit?: () => void;
-  onSave?: (data: CharacterImportData) => void;
+  onSave?: (data: CharacterImportData, createVersion: boolean) => void;
+  onRestoreVersion?: (version: CharacterVersion) => void;
   onDelete: () => void;
   onExportJson: () => void;
   onExportPng: () => Promise<void>;
@@ -1792,6 +1871,11 @@ function CharArchiveView({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showUnsavedConfirm, setShowUnsavedConfirm] = useState<"back" | "cancel" | null>(null);
+  const [showSaveVersionConfirm, setShowSaveVersionConfirm] = useState(false);
+  const [showVersions, setShowVersions] = useState(false);
+  const [versions, setVersions] = useState<CharacterVersion[]>([]);
+  const [restoreTarget, setRestoreTarget] = useState<CharacterVersion | null>(null);
+  const [deleteVersionTarget, setDeleteVersionTarget] = useState<CharacterVersion | null>(null);
   const [name, setName] = useState(char.name || "");
   const [persona, setPersona] = useState(char.persona || "");
   const [personality, setPersonality] = useState(char.personality || "");
@@ -1906,7 +1990,7 @@ function CharArchiveView({
     setTagInput("");
   }
 
-  function handleSave() {
+  function commitSave(createVersion: boolean) {
     const trimmedTimeZone = timeZone.trim();
     const normalizedTimeZone = trimmedTimeZone ? normalizeTimeZone(trimmedTimeZone) : undefined;
     if (onSave) {
@@ -1923,8 +2007,27 @@ function CharArchiveView({
         timeZone: normalizedTimeZone,
         tags,
         avatar: avatar ?? null
-      });
+      }, createVersion);
     }
+  }
+
+  function handleSave() {
+    if (isExisting) {
+      setShowSaveVersionConfirm(true);
+    } else {
+      commitSave(false);
+    }
+  }
+
+  function openVersionHistory() {
+    setVersions(loadCharacterVersions(char.id));
+    setShowVersions(true);
+  }
+
+  function removeVersion(version: CharacterVersion) {
+    deleteCharacterVersion(char.id, version.id);
+    setVersions(loadCharacterVersions(char.id));
+    setDeleteVersionTarget(null);
   }
 
   async function handleGenerateBrief() {
@@ -2275,12 +2378,161 @@ function CharArchiveView({
       onBack={handleBack}
       className="bg-[var(--c-page-body-bg)]"
       rightAction={!isEditing ? (
-        <button className="char-action-btn" onClick={onEdit}>
-          <IconEdit />
-        </button>
+        <div className="flex items-center gap-2">
+          {isExisting && (
+            <button
+              className="char-action-btn"
+              onClick={openVersionHistory}
+              aria-label="角色卡历史版本"
+              title="历史版本"
+            >
+              <History size={19} />
+            </button>
+          )}
+          <button className="char-action-btn" onClick={onEdit} aria-label="编辑角色卡">
+            <IconEdit />
+          </button>
+        </div>
       ) : undefined}
     >
       {archiveFrame}
+
+      {showSaveVersionConfirm && (
+        <div className="fixed inset-0 z-[10020] flex items-center justify-center bg-black/45 px-5" role="dialog" aria-modal="true" aria-label="保存角色卡">
+          <div className="w-full max-w-sm rounded-2xl border border-[var(--c-panel-border)] bg-[var(--c-page-body-bg)] p-5 text-[var(--c-text)] shadow-2xl">
+            <div className="text-base font-bold">保存角色卡</div>
+            <p className="mt-2 ts-12 leading-relaxed opacity-75">
+              当前是 V{getCharacterCurrentVersion(char.id)}。你可以先保存修改前的旧卡，也可以覆盖当前版本。
+            </p>
+            <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                className="rounded-xl bg-[var(--c-text)] px-4 py-3 font-semibold text-[var(--c-page-body-bg)]"
+                onClick={() => {
+                  setShowSaveVersionConfirm(false);
+                  commitSave(true);
+                }}
+              >
+                备份旧卡并保存为 V{getCharacterNextVersion(char.id)}
+              </button>
+              <button
+                type="button"
+                className="rounded-xl border border-[var(--c-panel-border)] px-4 py-3 font-semibold"
+                onClick={() => {
+                  setShowSaveVersionConfirm(false);
+                  commitSave(false);
+                }}
+              >
+                覆盖当前版本
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 opacity-65"
+                onClick={() => setShowSaveVersionConfirm(false)}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showVersions && (
+        <div
+          className="fixed inset-0 z-[10020] flex items-end justify-center bg-black/45 sm:items-center sm:px-5"
+          role="dialog"
+          aria-modal="true"
+          aria-label="角色卡历史版本"
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) setShowVersions(false);
+          }}
+        >
+          <div className="max-h-[78vh] w-full max-w-md overflow-hidden rounded-t-2xl border border-[var(--c-panel-border)] bg-[var(--c-page-body-bg)] text-[var(--c-text)] shadow-2xl sm:rounded-2xl">
+            <div className="flex items-center justify-between border-b border-[var(--c-panel-border)] px-5 py-4">
+              <div>
+                <div className="font-bold">历史版本</div>
+                <div className="mt-0.5 ts-10 opacity-60">当前生效：V{getCharacterCurrentVersion(char.id)}</div>
+              </div>
+              <button type="button" className="px-2 py-1 font-semibold" onClick={() => setShowVersions(false)}>关闭</button>
+            </div>
+            <div className="max-h-[62vh] overflow-y-auto p-4">
+              {versions.length === 0 ? (
+                <div className="py-10 text-center ts-12 opacity-60">还没有历史版本。编辑保存或由小卷修改后会自动生成。</div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {versions.map((version) => (
+                    <div key={version.id} className="rounded-xl border border-[var(--c-panel-border)] p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-bold">V{version.version}</div>
+                          <div className="mt-1 ts-10 opacity-65">{version.label}</div>
+                          <div className="mt-1 ts-10 opacity-50">{new Date(version.createdAt).toLocaleString()}</div>
+                        </div>
+                        {getCharacterCurrentVersion(char.id) === version.version && (
+                          <span className="shrink-0 rounded-full border border-[var(--c-panel-border)] px-2 py-1 ts-10">当前</span>
+                        )}
+                      </div>
+                      <div className="mt-3 rounded-lg bg-black/5 p-3 ts-11 dark:bg-white/5">
+                        <div className="font-semibold">{version.data.name || "未命名角色"}</div>
+                        <div className="mt-1 line-clamp-3 whitespace-pre-wrap opacity-65">
+                          {version.data.persona || version.data.personality || "（无角色设定）"}
+                        </div>
+                      </div>
+                      <div className="mt-3 flex gap-2">
+                        <button
+                          type="button"
+                          className="flex-1 rounded-lg bg-[var(--c-text)] px-3 py-2 ts-12 font-semibold text-[var(--c-page-body-bg)] disabled:opacity-40"
+                          disabled={getCharacterCurrentVersion(char.id) === version.version}
+                          onClick={() => setRestoreTarget(version)}
+                        >
+                          切换到 V{version.version}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-red-400/60 px-3 py-2 ts-12 text-red-600"
+                          onClick={() => setDeleteVersionTarget(version)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {restoreTarget && (
+        <ConfirmDialog
+          title={`切换到 V${restoreTarget.version}？`}
+          message="当前角色卡会切换为该快照。切走前会同步保存当前版本，切换本身不会创建新版本号。"
+          icon={History}
+          confirmLabel="确认切换"
+          cancelLabel="取消"
+          onConfirm={() => {
+            const target = restoreTarget;
+            setRestoreTarget(null);
+            setShowVersions(false);
+            onRestoreVersion?.(target);
+          }}
+          onCancel={() => setRestoreTarget(null)}
+        />
+      )}
+
+      {deleteVersionTarget && (
+        <ConfirmDialog
+          title={`删除 V${deleteVersionTarget.version}？`}
+          message="此历史快照删除后无法恢复，不会删除当前角色卡。"
+          icon={AlertCircle}
+          variant="danger"
+          confirmLabel="删除版本"
+          cancelLabel="取消"
+          onConfirm={() => removeVersion(deleteVersionTarget)}
+          onCancel={() => setDeleteVersionTarget(null)}
+        />
+      )}
 
       {isEditing && showTimeZonePicker && (
         <div

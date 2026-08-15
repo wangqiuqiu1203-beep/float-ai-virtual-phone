@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useContext } from "react";
 import { Plus, RefreshCw, Rss, AlertCircle, FileEdit, Trash2, X, Check } from "lucide-react";
 import { SettingsContext } from "../phone-settings-app";
 import type { ApiConfig } from "@/lib/settings-types";
-import { loadApiConfigs, saveApiConfigs } from "@/lib/settings-storage";
+import { loadApiConfigs, removeApiConfigReferences, saveApiConfigs } from "@/lib/settings-storage";
 import { generateEmbedding, isEmbeddingModelName } from "@/lib/memory-embedding";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { Toggle, Input } from "@/components/ui/form";
@@ -98,6 +98,7 @@ export function ApiSettings() {
 
     const removeConfig = (id: string) => {
         persist(configs.filter(c => c.id !== id));
+        removeApiConfigReferences(id);
         const newFetchedModels = { ...fetchedModels };
         delete newFetchedModels[id];
         setFetchedModels(newFetchedModels);
@@ -121,9 +122,15 @@ export function ApiSettings() {
             // Gemini 原生协议（/v1beta）：URL 用 ?key= 鉴权，响应是 { models: [{ name }] }
             // OpenAI 兼容（/v1）：Authorization: Bearer + 响应是 { data: [{ id }] }
             const isGoogleNative = config.provider === "Google";
+            // 用户常把完整端点填进 Base URL（如 .../v1/embeddings、.../v1/chat/completions），
+            // 拼 /models 前剥掉这类端点后缀；已以 /models 结尾则原样使用。
+            const modelsBase = baseUrl
+                .replace(/\/$/, "")
+                .replace(/\/(chat\/completions|completions|embeddings|messages)$/i, "");
+            const modelsUrl = /\/models$/i.test(modelsBase) ? modelsBase : `${modelsBase}/models`;
             const url = isGoogleNative
-                ? `${baseUrl.replace(/\/$/, "")}/models?key=${encodeURIComponent(config.apiKey)}`
-                : `${baseUrl.replace(/\/$/, "")}/models`;
+                ? `${modelsUrl}?key=${encodeURIComponent(config.apiKey)}`
+                : modelsUrl;
             const headers: Record<string, string> = { "Content-Type": "application/json" };
             if (!isGoogleNative) headers["Authorization"] = `Bearer ${config.apiKey}`;
 

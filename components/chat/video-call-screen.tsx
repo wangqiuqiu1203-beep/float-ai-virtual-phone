@@ -18,6 +18,7 @@ import { useCallKeyboardOffsetStyle } from "./use-call-keyboard-offset";
 import { CallSttWarningDialog, hideCallSttWarningPermanently, isCallSttWarningHidden } from "./call-stt-warning-dialog";
 import { isAndroidBrowser } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
+import { startIncomingCallVibration } from "@/lib/call-vibration";
 
 // ── Types ───────────────────────────────────────────
 
@@ -90,6 +91,13 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const userAvatarRef = useRef<string | null>(_initUi?.avatarUrl || null);
 
     useEffect(() => { stateRef.current = callState; }, [callState]);
+
+    // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
+    useEffect(() => {
+        if (initiator !== "character" || callState !== "CONNECTING") return;
+        const stop = startIncomingCallVibration();
+        return stop;
+    }, [initiator, callState]);
 
     // Pause WeChat keep-alive while the call holds the mic/audio; restore on exit.
     useEffect(() => {
@@ -325,7 +333,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[] } => {
         const previousState = getLatestCharacterStateValues(session.contactId);
 
-        const { parts, stateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
+        const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
 
         // Filter out non-chat action types
         const chatParts = parts.filter(p =>
@@ -337,6 +345,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 sessionId: session.id, role: "assistant", content: "",
                 statusPanel,
                 innerMonologue, stateValues: stateValues.length > 0 ? stateValues : undefined,
+                freshStateValues,
             });
             messagesRef.current = [...messagesRef.current, aiMsg];
         } else {
@@ -348,6 +357,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
                     innerMonologue: idx === 0 && innerMonologue ? innerMonologue : undefined,
                     stateValues: idx === 0 && stateValues.length > 0 ? stateValues : undefined,
+                    freshStateValues: idx === 0 ? freshStateValues : undefined,
                 })
             );
             messagesRef.current = [...messagesRef.current, ...newMsgs];

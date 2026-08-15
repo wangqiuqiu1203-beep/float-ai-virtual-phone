@@ -23,6 +23,7 @@ import type { DesktopIconLayout } from "@/lib/desktop-layout-storage";
 import { CUSTOM_APPS_UPDATED_EVENT, loadInstalledCustomApps } from "@/lib/custom-app-storage";
 import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
 import { PageShell } from "@/components/ui/page-shell";
+import { readPwaDisplayPreference, writePwaDisplayPreference } from "@/lib/pwa-display-mode";
 import {
   GRID_COLS,
   GRID_ROWS,
@@ -45,6 +46,7 @@ import {
   saveThemeAssetFromBlob,
   deleteThemeAsset,
   getThemeAssetMap,
+  describeAssetSaveError,
 } from "@/lib/theme-storage";
 import { BINDING_ACCENTS } from "@/lib/ui-accent-colors";
 import { ConfirmDialog, ContentDialog } from "@/components/ui/modal";
@@ -80,6 +82,7 @@ type PhoneThemeAppProps = {
   onDesktopThemeChange: (next: {
     widgets: WidgetInstance[];
     iconLayout: DesktopIconLayout;
+    dock?: DesktopIconId[];
   }) => void;
   pageIcons: DesktopIconLayout;
   iconSkins: Record<string, string | null>;
@@ -193,6 +196,7 @@ export function PhoneThemeApp({
     return "menu";
   });
   const [showStatusBarAdjust, setShowStatusBarAdjust] = useState(false);
+  const [systemBarShown, setSystemBarShown] = useState(() => typeof document !== "undefined" && readPwaDisplayPreference(document.cookie) === "standalone");
   const [showTextAdjust, setShowTextAdjust] = useState(false);
   const [showThemeTransfer, setShowThemeTransfer] = useState(false);
   const [themeTransferBusy, setThemeTransferBusy] = useState(false);
@@ -231,7 +235,7 @@ export function PhoneThemeApp({
     setThemeTransferBusy(true);
     try {
       const result = await installThemePackageFile(file);
-      onDesktopThemeChange({ widgets: result.widgets, iconLayout: result.iconLayout });
+      onDesktopThemeChange({ widgets: result.widgets, iconLayout: result.iconLayout, dock: result.dock });
       await onApply(result.themeProfile);
       onDraftChange(result.themeProfile);
       setShowThemeTransfer(false);
@@ -248,11 +252,11 @@ export function PhoneThemeApp({
     setThemeTransferBusy(true);
     try {
       const result = await resetThemePackageState();
-      onDesktopThemeChange({ widgets: result.widgets, iconLayout: result.iconLayout });
+      onDesktopThemeChange({ widgets: result.widgets, iconLayout: result.iconLayout, dock: result.dock });
       await onApply(result.themeProfile);
       onDraftChange(result.themeProfile);
       setConfirmThemeReset(false);
-      onNotice("已恢复默认外观，壁纸库和自定义组件已保留。");
+      onNotice("已恢复默认外观，壁纸库、自定义组件和自定义 App 已保留。");
     } catch (error) {
       console.error(error);
       onNotice(error instanceof Error ? error.message : "恢复默认失败");
@@ -437,10 +441,12 @@ export function PhoneThemeApp({
             <p className="ts-14 text-[var(--c-icon)]">{"\u300C"}{SECTION_TITLES[section]}{"\u300D\u529F\u80FD\u5F00\u53D1\u4E2D\u2026"}</p>
           </div>
         )}
+      {/* 不限定 accept：.ai-theme 是自定义后缀，iOS「文件」选择器会把
+          没有注册 UTI 的类型置灰导致选不中。放开后由 installThemePackageFile
+          校验包内 manifest.json，非法文件照样会被拒。 */}
       <input
         ref={importFileRef}
         type="file"
-        accept=".ai-theme,.zip,application/zip,application/x-zip-compressed"
         className="hidden"
         onChange={handleImportFileChange}
       />
@@ -489,7 +495,7 @@ export function PhoneThemeApp({
       {confirmThemeReset && (
         <ConfirmDialog
           title="恢复默认外观？"
-          message="将恢复默认主题色、当前壁纸、图标、桌面组件和桌面位置；已导入的壁纸库和自定义组件会保留，但不会继续应用在桌面上。"
+          message="将恢复默认主题色、当前壁纸、图标、桌面组件和桌面位置；已导入的壁纸库和自定义组件会保留，但不会继续应用在桌面上。已安装的自定义 App 图标会自动排回桌面空位。"
           icon={AlertCircle}
           variant="danger"
           confirmLabel={themeTransferBusy ? "恢复中" : "恢复默认"}
@@ -502,7 +508,7 @@ export function PhoneThemeApp({
       )}
       {showStatusBarAdjust && createPortal(
         <ContentDialog
-          title={"状态栏位置"}
+          title={"状态栏"}
           confirmLabel={"确定"}
           cancelLabel={"重置"}
           onConfirm={() => setShowStatusBarAdjust(false)}
@@ -515,6 +521,28 @@ export function PhoneThemeApp({
           }}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text)" }}>{"显示系统状态栏"}</span>
+              <label className="block w-10 h-[22px] cursor-pointer relative shrink-0" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  checked={systemBarShown}
+                  onChange={(e) => {
+                    const shown = e.target.checked;
+                    setSystemBarShown(shown);
+                    writePwaDisplayPreference(shown ? "standalone" : "fullscreen");
+                    if (shown && document.fullscreenElement) void document.exitFullscreen?.().catch(() => {});
+                    onNotice(shown ? "已开启系统状态栏，重新添加到桌面后完全生效" : "已恢复沉浸全屏，重新添加到桌面后完全生效");
+                  }}
+                  className="w-full h-full rounded-[11px] m-0 outline-none"
+                  style={{ appearance: "none", backgroundColor: systemBarShown ? "var(--c-success)" : "var(--c-page-body-bg)", border: systemBarShown ? "none" : "1px solid var(--c-input-border)", transition: "0.2s" }}
+                />
+                <div className="absolute w-[18px] h-[18px] bg-white rounded-full top-[2px] pointer-events-none" style={{ left: systemBarShown ? 20 : 2, transition: "0.2s", boxShadow: "0 2px 4px rgba(0,0,0,0.15)" }} />
+              </label>
+            </div>
+            <p style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-icon)", lineHeight: 1.4 }}>
+              {"显示手机系统自己的状态栏（时间/电量/通知），退出沉浸全屏，安卓不再反复弹全屏提示。开启后本页的虚拟状态栏不再显示；已装到桌面的需删除后重新「添加到主屏幕」才完全生效。"}
+            </p>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text)" }}>{"顶部偏移"}</span>
               <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text-title)", fontWeight: 600 }}>{statusBarTop}px</span>
@@ -1052,8 +1080,8 @@ function IconSkinPage({
         (Object.values(resolveActiveIconSkins(next)).filter(Boolean) as string[])
       );
       setThumbs(map);
-    } catch {
-      onNotice("上传失败，请重试");
+    } catch (error) {
+      onNotice(describeAssetSaveError(error));
     }
     setUploadTarget(null);
   }, [draft, uploadTarget, onDraftChange, onApply, onNotice]);
@@ -1089,8 +1117,8 @@ function IconSkinPage({
       await onApply(next);
       const map = await getThemeAssetMap([assetId]);
       setDockThumbUrl(map[assetId] ?? null);
-    } catch {
-      onNotice("上传失败，请重试");
+    } catch (error) {
+      onNotice(describeAssetSaveError(error));
     }
   }, [draft, onDraftChange, onApply, onNotice]);
 
@@ -1314,8 +1342,8 @@ function WallpaperPage({
       // Reload thumbnails for the new asset
       const map = await getThemeAssetMap(next.wallpaperLibrary);
       setThumbs(map);
-    } catch {
-      onNotice("\u4E0A\u4F20\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
+    } catch (error) {
+      onNotice(describeAssetSaveError(error));
     }
   }, [draft, onDraftChange, onApply, onNotice]);
 

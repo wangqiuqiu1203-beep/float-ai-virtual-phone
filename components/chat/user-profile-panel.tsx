@@ -16,6 +16,7 @@ import { PageShell } from "@/components/ui/page-shell";
 import { CHAT_APP_CSS_EXAMPLE } from "@/lib/css-examples";
 import { Toggle } from "@/components/ui/form";
 import { StickerManager } from "./sticker-manager";
+import { ChatPluginManager } from "./chat-plugin-manager";
 import { WalletPanel } from "./wallet-panel";
 import { loadMomentsConfig, saveMomentsConfig, DEFAULT_MOMENTS_CONFIG, type MomentsInteractionConfig, getAllPosts } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
@@ -35,7 +36,9 @@ import {
     MessageSquare,
     MessageSquareDashed,
     Palette,
+    Puzzle,
     Keyboard,
+    Vibrate,
     Radio,
     RotateCcw,
     Send,
@@ -135,6 +138,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     const [showFollowUpEditor, setShowFollowUpEditor] = useState(false);
     const [showApiLog, setShowApiLog] = useState(false);
     const [showStickerManager, setShowStickerManager] = useState(false);
+    const [showPluginManager, setShowPluginManager] = useState(false);
     const [showCSSEditor, setShowCSSEditor] = useState(false);
     const [showMomentsSettings, setShowMomentsSettings] = useState(false);
     const [showWalletPanel, setShowWalletPanel] = useState(false);
@@ -143,6 +147,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     const [notifHint, setNotifHint] = useState<string | null>(null);
     const [notifChecking, setNotifChecking] = useState(false);
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(false);
+    const [callVibrationEnabled, setCallVibrationEnabled] = useState(true);
     const [userStats, setUserStats] = useState({ chats: 0, moments: 0, visitors: 1234 });
     const [walletSummary, setWalletSummary] = useState(() => {
         const wallet = loadWalletState();
@@ -158,6 +163,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
         const browserGranted = isBrowserNotificationGranted();
         setNotifEnabled(settings.browserNotificationsEnabled === true && browserGranted);
         setEnterToSendEnabled(settings.enterToSendEnabled === true);
+        setCallVibrationEnabled(settings.callVibrationEnabled !== false);
         if (settings.browserNotificationsEnabled === true && !browserGranted) {
             setNotifHint(readBrowserNotificationPermissionHint());
         }
@@ -225,6 +231,11 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
         saveChatAppSettings({ ...loadChatAppSettings(), enterToSendEnabled: enabled });
     };
 
+    const handleCallVibrationToggle = (enabled: boolean) => {
+        setCallVibrationEnabled(enabled);
+        saveChatAppSettings({ ...loadChatAppSettings(), callVibrationEnabled: enabled });
+    };
+
     if (showFollowUpEditor) {
         return <FollowUpSettingsEditor onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowFollowUpEditor(false); }} />;
     }
@@ -236,6 +247,9 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     }
     if (showStickerManager) {
         return <StickerManager onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowStickerManager(false); }} />;
+    }
+    if (showPluginManager) {
+        return <ChatPluginManager onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowPluginManager(false); }} />;
     }
     if (showMomentsSettings) {
         return <InlineMomentsSettings onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowMomentsSettings(false); }} />;
@@ -369,10 +383,10 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                         </button>
                     </div>
 
-                    {/* Standard Settings List */}
-                    <div className="mx-4 bg-[var(--c-card)] rounded-2xl px-4 py-1 flex flex-col"
+                    {/* 主动消息 */}
+                    <div className="mx-4 mb-4 bg-[var(--c-card)] rounded-2xl px-4 py-1 flex flex-col"
                          style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
-                        <button className="flex items-center gap-3 py-3.5 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowFollowUpEditor(true); }}>
+                        <button className="flex items-center gap-3 py-3.5 w-full" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowFollowUpEditor(true); }}>
                             <Send size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
                             <div className="flex flex-col flex-1 text-left gap-0.5">
                                 <span className="ts-14 font-semibold text-[var(--c-text-title)]">追发规则与延迟控制</span>
@@ -380,16 +394,11 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                             </div>
                             <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
                         </button>
-                        
-                        <button className="flex items-center gap-3 py-3.5 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowApiLog(true); }}>
-                            <FileCode2 size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
-                            <div className="flex flex-col flex-1 text-left gap-0.5">
-                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">底层调用大模型日志</span>
-                                <span className="ts-11 text-[var(--c-text)] opacity-70">查看网络通信中大模型的原始数据流</span>
-                            </div>
-                            <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
-                        </button>
+                    </div>
 
+                    {/* 输入与提醒 */}
+                    <div className="mx-4 mb-4 bg-[var(--c-card)] rounded-2xl px-4 py-1 flex flex-col"
+                         style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
                         <div className="flex items-center gap-3 py-3 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]">
                             <Keyboard size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
                             <div className="flex flex-col flex-1 text-left gap-0.5">
@@ -397,6 +406,15 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                                 <span className="ts-11 text-[var(--c-text)] opacity-70">开启后 Enter 发送，Shift+Enter 换行</span>
                             </div>
                             <Toggle checked={enterToSendEnabled} onChange={handleEnterToSendToggle} />
+                        </div>
+
+                        <div className="flex items-center gap-3 py-3 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]">
+                            <Vibrate size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
+                            <div className="flex flex-col flex-1 text-left gap-0.5">
+                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">语音/视频来电振动</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">角色来电等待接听时手机振动（iOS 网页不支持振动）</span>
+                            </div>
+                            <Toggle checked={callVibrationEnabled} onChange={handleCallVibrationToggle} />
                         </div>
 
                         <div className="flex items-center gap-3 py-3 w-full">
@@ -407,6 +425,28 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                             </div>
                             <Toggle checked={notifEnabled} disabled={notifChecking} onChange={handleNotificationToggle} />
                         </div>
+                    </div>
+
+                    {/* 高级工具 */}
+                    <div className="mx-4 bg-[var(--c-card)] rounded-2xl px-4 py-1 flex flex-col"
+                         style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
+                        <button className="flex items-center gap-3 py-3.5 w-full border-b border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowPluginManager(true); }}>
+                            <Puzzle size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
+                            <div className="flex flex-col flex-1 text-left gap-0.5">
+                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">扩展插件</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">JS 插件拦截聊天管线、注入提示词、自由渲染界面</span>
+                            </div>
+                            <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
+                        </button>
+
+                        <button className="flex items-center gap-3 py-3.5 w-full" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowApiLog(true); }}>
+                            <FileCode2 size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
+                            <div className="flex flex-col flex-1 text-left gap-0.5">
+                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">底层调用大模型日志</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">查看网络通信中大模型的原始数据流</span>
+                            </div>
+                            <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
+                        </button>
                     </div>
                 </div>
             </PageShell>

@@ -9,6 +9,9 @@ import {
 import { resolveUserIdentity } from "./settings-storage";
 import { loadCharacters } from "./character-storage";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-hooks";
+import { parseAIResponse } from "./rich-message-parser";
+import { extractTextToolDirectiveText } from "./text-tool-protocol";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -47,6 +50,8 @@ export type ChatSession = {
     isMuted?: boolean;
     bilingualTranslationEnabled?: boolean;
     collapseBilingualTranslation?: boolean;
+    /** 丢弃角色输出的无效表情包（名称不在角色表情包与内置表情中时直接滤除该消息） */
+    discardInvalidStickers?: boolean;
     bilingualTranslationPrompt?: string;
     offlineBilingualTranslationPrompt?: string;
     dialectMode?: boolean; // 粤语翻译模式：角色用粤语回复并附普通话译文
@@ -88,11 +93,12 @@ export type ChatMessage = {
     responseBatchId?: string; // Assistant raw-response batch id
     rawResponseText?: string; // Assistant raw response before parsing/splitting
     responseRoundId?: string; // Group-chat whole-round id shared across all bubbles in one assistant turn
+    toolExecutionId?: string; // Links visible tool attachments to their persisted tool result
     editableResponseText?: string; // Processed text shown in the reply editor
     isRetracted?: boolean;
     mediaType?: "image" | "audio" | "video"
         | "red_packet" | "transfer" | "location"
-        | "poke" | "sticker" | "quote"
+        | "poke" | "sticker" | "quote" | "dice"
         | "voice_call" | "video_call"
         | "accept_red_packet" | "decline_red_packet" | "accept_transfer" | "decline_transfer"
         | "payment_request" | "accept_payment_request" | "decline_payment_request"
@@ -102,12 +108,14 @@ export type ChatMessage = {
         | "contact_card"
         | "app_card"
         | "tool_notice"
+        | "tool_call"
         | "tool_result"
         | "memory_write_request"
         | "reading_discuss"
         | "system_instruction"
         | "group_admin_notice"
-        | "media_file";
+        | "media_file"
+        | `plugin:${string}`; // 聊天插件自定义消息类型（由注册该 kind 的插件渲染气泡）
     origin?: "chat" | "reading_discuss" | "custom_app" | "custom_app_background";
     mediaUrl?: string;
     mediaData?: {
@@ -119,6 +127,7 @@ export type ChatMessage = {
         quotePreview?: string;    // 引用消息预览文本
         quoteRole?: ChatMessageRole; // 引用消息的 role
         stickerUrl?: string;      // 表情包图片路径
+        diceFace?: number;        // 骰子点数（1-6），气泡翻滚后定格并与全屏动效一致
         pokeSender?: string;      // 拍一拍发起人名字
         pokeTarget?: string;      // 拍一拍目标名字
         contactCardName?: string; // 名片被推荐人名字（渲染时按推荐人同世界实时解析，未建档也可成卡）
@@ -222,7 +231,11 @@ export type ChatMessage = {
     isTyping?: boolean; // temporary flag for UI rendering
     statusPanel?: string; // AI display-only status content from [状态栏] tags
     innerMonologue?: string; // AI inner monologue content from [内心] tags
+    reasoningText?: string; // 模型思维链（reasoning/CoT）内容，挂在回复批次的第一条气泡上
     stateValues?: StateValue[]; // parsed character state values from inner monologue
+    // 本轮回复实际输出的状态值（未合并历史）。undefined = 旧数据（渲染时回退到 stateValues）；
+    // [] = 本轮明确没输出（内心卡片不显示状态面板）。stateValues 仍存合并快照供状态链读取。
+    freshStateValues?: StateValue[];
     followUpIndex?: number; // which follow-up round produced this message (1 = first follow-up)
     nativeToolCalls?: NativeToolCallRecord[]; // assistant native function/tool calls for prompt replay
     nativeToolResult?: NativeToolResultRecord; // tool result paired with an assistant native tool call
@@ -247,7 +260,16 @@ export type ChatAppSettings = {
     quickActionEnabled?: boolean; // When true, show the floating quick action entry
     browserNotificationsEnabled?: boolean; // When true, send browser Notification API alerts when page is hidden
     enterToSendEnabled?: boolean; // When true, Enter sends chat input and Shift+Enter inserts a newline
+    callVibrationEnabled?: boolean; // 语音/视频来电等待接听时循环振动（默认开；iOS 网页不支持振动则无效果）
+    maxToolRounds?: number; // 单条消息的工具循环轮数上限（默认 5；每轮=一次模型请求，轮内调用条数不限）
 };
+
+/** 单条消息工具循环轮数上限（默认 5，夹在 1–20 之间） */
+export function getMaxToolRounds(): number {
+    const raw = loadChatAppSettings().maxToolRounds;
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return 5;
+    return Math.max(1, Math.min(20, Math.round(raw)));
+}
 
 export const CHAT_APP_SETTINGS_UPDATED_EVENT = "chat-app-settings-updated";
 export const CHAT_MESSAGE_PUSHED_EVENT = "chat-message-pushed";
@@ -258,7 +280,7 @@ export const CHAT_REQUEST_REPLY_EVENT = "chat-request-reply";
 const MEDIA_PREVIEW_MAP: Record<string, string> = {
     image: "[图片]", audio: "[语音]", video: "[视频]",
     red_packet: "[红包]", transfer: "[转账]", location: "[位置]",
-    poke: "[拍了拍你]", sticker: "[表情]", quote: "[引用]",
+    poke: "[拍了拍你]", sticker: "[表情]", quote: "[引用]", dice: "[掷骰子]",
     gift: "[礼物]",
     contact_card: "[名片]",
     payment_request: "[代付请求]",
@@ -288,7 +310,7 @@ export function getChatMessagePreview(msg: ChatMessage): string {
     // Retracted: "你/对方撤回了一条消息"
     if (msg.isRetracted) return (msg.role === "user" ? "你" : "对方") + "撤回了一条消息";
 
-    if (msg.mediaType === "tool_result") return "";
+    if (msg.mediaType === "tool_result" || msg.mediaType === "tool_call") return "";
     if (msg.mediaType === "quote" && msg.content) return msg.content;
     if (msg.mediaType === "music_notify") return msg.content;
     if (msg.mediaType === "memory_write_request") {
@@ -357,7 +379,7 @@ export function getChatMessagePreview(msg: ChatMessage): string {
     if (msg.mediaType) return MEDIA_PREVIEW_MAP[msg.mediaType] || `[${msg.mediaType}]`;
 
     // Silent thought/status: empty content + folded panel → "♥"
-    if (!msg.content.trim() && (msg.innerMonologue || msg.statusPanel) && msg.role === "assistant") return "♥";
+    if (!msg.content.trim() && (msg.innerMonologue || msg.statusPanel || msg.reasoningText) && msg.role === "assistant") return "♥";
 
     // System messages: call messages → clean format, others → user name → "你"
     if (msg.role === "system") {
@@ -397,7 +419,7 @@ function hasPreviewText(text: string | undefined): boolean {
 
 function isSessionPreviewCandidate(msg: ChatMessage): boolean {
     if (isReadingDiscussMessage(msg)) return false;
-    if (msg.mediaType === "tool_result") return false;
+    if (msg.mediaType === "tool_result" || msg.mediaType === "tool_call") return false;
     if (msg.mediaType === "tool_notice") return false;
     if (msg.mediaType === "memory_write_request") return false;
     if (msg.role === "tool") return false;
@@ -406,7 +428,7 @@ function isSessionPreviewCandidate(msg: ChatMessage): boolean {
     if (msg.isRetracted) return true;
     if (msg.mediaType) return true;
     if (hasPreviewText(msg.content)) return true;
-    if (hasPreviewText(msg.statusPanel) || hasPreviewText(msg.innerMonologue)) return true;
+    if (hasPreviewText(msg.statusPanel) || hasPreviewText(msg.innerMonologue) || hasPreviewText(msg.reasoningText)) return true;
 
     return false;
 }
@@ -645,12 +667,55 @@ function normalizeChatSessions(sessions: ChatSession[]): NormalizedSessionList {
     return { items: normalized, changed, redirects };
 }
 
+// ── 用户主动删除的好友（墓碑）────────────────────────
+// 删好友是「删联系人、留会话」——会话留着，重新加回来才能接上历史记录。
+// 但下面的 restoreContactsForPrivateSessions 是条数据抢救逻辑：它看到
+// 「有会话却没联系人」就认定联系人表丢了，照着会话把联系人重建回来，
+// 于是刚删掉的好友立刻复活。这里把用户的主动删除记一笔，让抢救逻辑跳过
+// 它们；重新加好友时 addChatContact 会自动销掉墓碑。
+const REMOVED_CONTACTS_KEY = "ai_phone_removed_contacts_v1";
+registerKvMigration(REMOVED_CONTACTS_KEY);
+
+function loadRemovedContactIds(): Set<string> {
+    if (typeof window === "undefined") return new Set<string>();
+    try {
+        const raw = kvGet(REMOVED_CONTACTS_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        const ids: string[] = Array.isArray(parsed) ? parsed.filter((id: unknown): id is string => typeof id === "string" && !!id) : [];
+        return new Set<string>(ids);
+    } catch {
+        return new Set<string>();
+    }
+}
+
+function saveRemovedContactIds(ids: Set<string>): void {
+    if (typeof window === "undefined") return;
+    kvSet(REMOVED_CONTACTS_KEY, JSON.stringify([...ids]));
+}
+
+function markContactRemoved(characterId: string): void {
+    if (!characterId) return;
+    const ids = loadRemovedContactIds();
+    if (ids.has(characterId)) return;
+    ids.add(characterId);
+    saveRemovedContactIds(ids);
+}
+
+function unmarkContactRemoved(characterId: string): void {
+    if (!characterId) return;
+    const ids = loadRemovedContactIds();
+    if (!ids.delete(characterId)) return;
+    saveRemovedContactIds(ids);
+}
+
 function restoreContactsForPrivateSessions(contacts: ChatContact[], sessions: ChatSession[]): NormalizedList<ChatContact> {
     const characterIds = new Set(loadCharacters().map(character => character.id));
+    const removedByUser = loadRemovedContactIds();
     const privateSessionsWithMessages = sessions.filter(session =>
         !session.isGroup
         && session.contactId
         && characterIds.has(session.contactId)
+        && !removedByUser.has(session.contactId)
         && Boolean(getLastVisibleSessionMessage(session.id))
     );
     if (privateSessionsWithMessages.length === 0 || contacts.length >= privateSessionsWithMessages.length) {
@@ -700,6 +765,148 @@ function redirectMessagesToPreferredSessions(redirects: Map<string, string>): nu
     return changedMessages.length;
 }
 
+function normalizeLegacyTextToolHistory(messages: ChatMessage[]): {
+    items: ChatMessage[];
+    changedMessages: ChatMessage[];
+} {
+    const byId = new Map(messages.map(message => [message.id, message]));
+    const changed = new Map<string, ChatMessage>();
+    const added: ChatMessage[] = [];
+    const sorted = [...messages].sort(compareChatMessages);
+
+    for (const original of sorted) {
+        const current = byId.get(original.id) || original;
+
+        if (current.role === "user" && current.mediaType === "tool_result" && !current.nativeToolResult) {
+            const normalized = { ...current, role: "tool" as const };
+            byId.set(current.id, normalized);
+            changed.set(current.id, normalized);
+            continue;
+        }
+
+        if (current.role !== "assistant" || current.mediaType !== "tool_result" || current.nativeToolResult) continue;
+        const directiveText = extractTextToolDirectiveText(current.content);
+        if (!directiveText) continue;
+
+        const currentTime = parseIsoTime(current.createdAt);
+        const candidateCopies = sorted
+            .map(message => byId.get(message.id) || message)
+            .filter(message => {
+                if (
+                    message.sessionId !== current.sessionId
+                    || message.role !== "assistant"
+                    || message.mediaType !== "tool_notice"
+                    || !message.rawResponseText
+                ) return false;
+                if (message.rawResponseText === current.content) return true;
+                const copyTime = parseIsoTime(message.createdAt);
+                return Math.abs(copyTime - currentTime) < 60_000
+                    && extractTextToolDirectiveText(message.rawResponseText) === directiveText;
+            });
+        const copyGroups = new Map<string, ChatMessage[]>();
+        for (const copy of candidateCopies) {
+            if (!copy.responseBatchId) continue;
+            const group = copyGroups.get(copy.responseBatchId) || [];
+            group.push(copy);
+            copyGroups.set(copy.responseBatchId, group);
+        }
+        const currentOrder = getStableMessageOrder(current);
+        const matchingCopies = [...copyGroups.values()].sort((left, right) => {
+            const score = (group: ChatMessage[]) => Math.min(...group.map(copy => {
+                const copyOrder = getStableMessageOrder(copy);
+                if (currentOrder !== null && copyOrder !== null) {
+                    return copyOrder >= currentOrder
+                        ? copyOrder - currentOrder
+                        : 1_000_000 + currentOrder - copyOrder;
+                }
+                return Math.abs(parseIsoTime(copy.createdAt) - currentTime);
+            }));
+            return score(left) - score(right);
+        })[0] || [];
+
+        const responseBatchId = matchingCopies[0]?.responseBatchId || current.responseBatchId || createResponseBatchId();
+        const copyOrders = matchingCopies
+            .map(message => getStableMessageOrder(message))
+            .filter((order): order is number => order !== null);
+        const nextOrder = copyOrders.length > 0
+            ? Math.max(...copyOrders) + 0.0001
+            : current.order;
+        const normalizedCall: ChatMessage = {
+            ...current,
+            content: directiveText,
+            mediaType: "tool_call",
+            responseBatchId,
+            rawResponseText: undefined,
+            order: nextOrder,
+        };
+        byId.set(current.id, normalizedCall);
+        changed.set(current.id, normalizedCall);
+
+        for (const copy of matchingCopies) {
+            const normalizedCopy: ChatMessage = {
+                ...copy,
+                mediaType: undefined,
+                responseBatchId,
+            };
+            byId.set(copy.id, normalizedCopy);
+            changed.set(copy.id, normalizedCopy);
+        }
+    }
+
+    for (const original of sorted) {
+        const current = byId.get(original.id) || original;
+        if (
+            current.role !== "assistant"
+            || current.mediaType !== "tool_notice"
+            || !current.rawResponseText
+            || !current.responseBatchId
+        ) continue;
+        const directiveText = extractTextToolDirectiveText(current.rawResponseText);
+        if (!directiveText) continue;
+
+        const batchCopies = sorted
+            .map(message => byId.get(message.id) || message)
+            .filter(message =>
+                message.sessionId === current.sessionId
+                && message.responseBatchId === current.responseBatchId
+                && message.role === "assistant"
+                && message.mediaType === "tool_notice"
+            );
+        for (const copy of batchCopies) {
+            const normalizedCopy: ChatMessage = { ...copy, mediaType: undefined };
+            byId.set(copy.id, normalizedCopy);
+            changed.set(copy.id, normalizedCopy);
+        }
+
+        const copyOrders = batchCopies
+            .map(message => getStableMessageOrder(message))
+            .filter((order): order is number => order !== null);
+        const toolCall: ChatMessage = {
+            id: createMessageId(),
+            sessionId: current.sessionId,
+            role: "assistant",
+            content: directiveText,
+            status: current.status,
+            createdAt: current.createdAt,
+            order: copyOrders.length > 0 ? Math.max(...copyOrders) + 0.0001 : current.order,
+            responseBatchId: current.responseBatchId,
+            responseRoundId: current.responseRoundId,
+            editableResponseText: current.editableResponseText,
+            mediaType: "tool_call",
+            senderCharacterId: current.senderCharacterId,
+            senderName: current.senderName,
+        };
+        added.push(toolCall);
+        byId.set(toolCall.id, toolCall);
+        changed.set(toolCall.id, toolCall);
+    }
+
+    return {
+        items: [...messages.map(message => byId.get(message.id) || message), ...added],
+        changedMessages: [...changed.values()],
+    };
+}
+
 function refreshSessionPreviewMetadata(sessions: ChatSession[]): NormalizedList<ChatSession> {
     let changed = false;
     const items = sessions.map(session => {
@@ -734,7 +941,11 @@ export function hydrateChatStorage(): Promise<void> {
     if (_hydrated || typeof window === "undefined") return Promise.resolve();
     if (_hydratePromise) return _hydratePromise;
     _hydratePromise = initChatDb().then(data => {
-        _messagesCache = data.messages;
+        const normalizedToolHistory = normalizeLegacyTextToolHistory(data.messages);
+        _messagesCache = normalizedToolHistory.items;
+        if (normalizedToolHistory.changedMessages.length > 0) {
+            dbPutMessages(normalizedToolHistory.changedMessages);
+        }
         let normalizedContacts = normalizeChatContacts(data.contacts);
         const normalizedSessions = normalizeChatSessions(data.sessions);
         const redirectedMessages = redirectMessagesToPreferredSessions(normalizedSessions.redirects);
@@ -783,6 +994,9 @@ export function saveChatContacts(contacts: ChatContact[]) {
 }
 
 export function addChatContact(characterId: string): ChatContact | null {
+    // 任何一条"重新加上好友"的路径都会走到这里（通过好友申请、搜索添加、
+    // 后台引擎重新建联系），统一在这里解除删除状态，不会漏。
+    unmarkContactRemoved(characterId);
     const contacts = loadChatContacts();
     if (contacts.find(c => c.characterId === characterId)) return null; // already exists
 
@@ -798,6 +1012,7 @@ export function addChatContact(characterId: string): ChatContact | null {
 export function removeChatContact(characterId: string) {
     const contacts = loadChatContacts();
     saveChatContacts(contacts.filter(c => c.characterId !== characterId));
+    markContactRemoved(characterId);
 }
 
 // ── CRUD for Sessions ─────────────────────────
@@ -895,14 +1110,24 @@ export function createResponseRoundId(): string {
     return `round_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+export function createToolExecutionId(): string {
+    return `toolrun_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
 export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & { status?: ChatMessageStatus }): ChatMessage {
-    const newMsg: ChatMessage = {
+    let newMsg: ChatMessage = {
         ...msg,
         id: createMessageId(),
         createdAt: new Date().toISOString(),
         order: getNextMessageOrder(msg.sessionId),
         status: msg.status || "sent"
     };
+
+    // 聊天插件织入点：消息落库前同步改写（全部消息路径都会经过这里）
+    const pluginResult = runChatPluginTransformSync("message.beforePersist", { message: newMsg });
+    if (pluginResult.message && typeof pluginResult.message === "object" && pluginResult.message.id === newMsg.id) {
+        newMsg = pluginResult.message;
+    }
 
     _messagesCache.push(newMsg);
     dbPutMessage(newMsg);
@@ -923,6 +1148,7 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent(CHAT_MESSAGE_PUSHED_EVENT, { detail: { message: newMsg } }));
     }
+    emitChatPluginEvent("message.persisted", { message: newMsg });
 
     return newMsg;
 }
@@ -957,13 +1183,212 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
     return { message: newMsg, inserted: true };
 }
 
+function removeFirstExactResponsePart(rawResponseText: string, content: string): string {
+    const part = content.trim();
+    if (!part) return rawResponseText;
+    const index = rawResponseText.indexOf(part);
+    if (index === -1) return rawResponseText;
+    return `${rawResponseText.slice(0, index)}${rawResponseText.slice(index + part.length)}`
+        .replace(/[ \t]+\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
+function formatStateValuesForRaw(stateValues?: StateValue[]): string {
+    if (!stateValues || stateValues.length === 0) return "";
+    return stateValues.map(item => `[${item.name}:${item.value}]`).join("");
+}
+
+function messageToEditableRawPart(message: ChatMessage): string {
+    if (message.mediaType === "tool_notice" || message.mediaType === "tool_result") return "";
+    if (message.mediaType === "poke") {
+        const sender = message.mediaData?.pokeSender?.trim();
+        const target = message.mediaData?.pokeTarget?.trim();
+        if (sender && target) return `[${sender}拍了拍${target}]`;
+    }
+    if (message.mediaType === "image") {
+        const label = message.mediaData?.label?.trim() || message.content.trim();
+        if (label) return `[照片:${label}]`;
+    }
+    return message.content.trim();
+}
+
+function rebuildEditableRawFromRemainingBatch(messages: ChatMessage[]): string {
+    const sorted = [...messages]
+        .filter(message => message.role === "assistant")
+        .sort(compareChatMessages);
+    if (sorted.length === 0) return "";
+
+    const metaCarrier = sorted.find(message =>
+        (message.stateValues && message.stateValues.length > 0)
+        || message.statusPanel
+        || message.innerMonologue
+    );
+    const headerParts = [
+        formatStateValuesForRaw(metaCarrier?.stateValues),
+        metaCarrier?.statusPanel ? `[状态栏]${metaCarrier.statusPanel}[/状态栏]` : "",
+        metaCarrier?.innerMonologue ? `[内心]${metaCarrier.innerMonologue}[/内心]` : "",
+    ].filter(Boolean);
+    const bodyParts = sorted
+        .map(messageToEditableRawPart)
+        .filter(part => part.length > 0);
+
+    return [...headerParts, ...bodyParts].join("\n\n").trim();
+}
+
+function normalizeParsedRawPartForCompare(part: ReturnType<typeof parseAIResponse>["parts"][number]): string {
+    if (part.mediaType === "poke") {
+        const sender = part.mediaData?.pokeSender?.trim();
+        const target = part.mediaData?.pokeTarget?.trim();
+        return sender && target ? `${sender} 拍了拍 ${target}` : "";
+    }
+    if (part.mediaType === "image") {
+        return part.mediaData?.label?.trim() || part.content.trim();
+    }
+    return part.content.trim();
+}
+
+function rawTextStillContainsDeletedPart(rawText: string, deleted: ChatMessage): boolean {
+    const deletedText = deleted.content.trim();
+    if (deletedText && rawText.includes(deletedText)) return true;
+    try {
+        return parseAIResponse(rawText, []).parts.some(part => {
+            if (deleted.mediaType === "poke" && part.mediaType === "poke") return true;
+            const normalized = normalizeParsedRawPartForCompare(part);
+            if (!normalized) return false;
+            return normalized === deletedText
+                || (!!deletedText && normalized.includes(deletedText))
+                || (!!deleted.mediaData?.label && normalized.includes(String(deleted.mediaData.label)));
+        });
+    } catch {
+        return false;
+    }
+}
+
+function syncDeletedResponseBatchMetadata(deletedMessages: ChatMessage[]): void {
+    const deletedByBatch = new Map<string, ChatMessage[]>();
+    const deletedByRound = new Map<string, ChatMessage[]>();
+    for (const message of deletedMessages) {
+        if (message.responseBatchId) {
+            const key = `${message.sessionId}\u0000${message.responseBatchId}`;
+            const batch = deletedByBatch.get(key) || [];
+            batch.push(message);
+            deletedByBatch.set(key, batch);
+        }
+        if (message.responseRoundId) {
+            const key = `${message.sessionId}\u0000${message.responseRoundId}`;
+            const round = deletedByRound.get(key) || [];
+            round.push(message);
+            deletedByRound.set(key, round);
+        }
+    }
+
+    const changed = new Map<string, ChatMessage>();
+    for (const [key, deletedBatch] of deletedByBatch) {
+        const separatorIndex = key.indexOf("\u0000");
+        const sessionId = key.slice(0, separatorIndex);
+        const responseBatchId = key.slice(separatorIndex + 1);
+        const remainingBatch = _messagesCache.filter(message =>
+            message.sessionId === sessionId && message.responseBatchId === responseBatchId
+        );
+        const rawCarrier = remainingBatch.find(message => message.rawResponseText !== undefined)
+            || deletedBatch.find(message => message.rawResponseText !== undefined);
+        if (rawCarrier?.rawResponseText === undefined) continue;
+
+        const assistantDeleted = [...deletedBatch].sort(compareChatMessages).filter(deleted =>
+            deleted.role === "assistant"
+            && deleted.mediaType !== "tool_notice"
+            && deleted.mediaType !== "tool_result"
+        );
+        let nextRaw = rawCarrier.rawResponseText;
+        let needsRebuild = remainingBatch.some(message => message.role === "assistant") && assistantDeleted.length > 0;
+        for (const deleted of assistantDeleted) {
+            const before = nextRaw;
+            nextRaw = removeFirstExactResponsePart(nextRaw, deleted.content);
+            if (nextRaw === before && rawTextStillContainsDeletedPart(nextRaw, deleted)) {
+                needsRebuild = true;
+            }
+        }
+        if (needsRebuild) {
+            const rebuilt = rebuildEditableRawFromRemainingBatch(remainingBatch);
+            if (rebuilt) nextRaw = rebuilt;
+        }
+        if (nextRaw === rawCarrier.rawResponseText) continue;
+
+        for (const message of remainingBatch) {
+            if (message.rawResponseText === undefined || message.rawResponseText === nextRaw) continue;
+            changed.set(message.id, { ...message, rawResponseText: nextRaw });
+        }
+    }
+
+    for (const [key, deletedRound] of deletedByRound) {
+        const separatorIndex = key.indexOf("\u0000");
+        const sessionId = key.slice(0, separatorIndex);
+        const responseRoundId = key.slice(separatorIndex + 1);
+        const remainingRound = _messagesCache.filter(message =>
+            message.sessionId === sessionId && message.responseRoundId === responseRoundId
+        );
+        const editableCarrier = remainingRound.find(message => message.editableResponseText !== undefined)
+            || deletedRound.find(message => message.editableResponseText !== undefined);
+        if (editableCarrier?.editableResponseText === undefined) continue;
+
+        let nextEditable = editableCarrier.editableResponseText;
+        for (const deleted of [...deletedRound].sort(compareChatMessages)) {
+            if (
+                deleted.role !== "assistant"
+                || deleted.mediaType === "tool_notice"
+                || deleted.mediaType === "tool_result"
+            ) continue;
+            nextEditable = removeFirstExactResponsePart(nextEditable, deleted.content);
+        }
+        if (nextEditable === editableCarrier.editableResponseText) continue;
+
+        for (const message of remainingRound) {
+            if (message.editableResponseText === undefined || message.editableResponseText === nextEditable) continue;
+            const current = changed.get(message.id) || message;
+            changed.set(message.id, { ...current, editableResponseText: nextEditable });
+        }
+    }
+
+    if (changed.size === 0) return;
+    _messagesCache = _messagesCache.map(message => changed.get(message.id) || message);
+    dbPutMessages([...changed.values()]);
+}
+
+function expandToolExecutionDeleteSet(messages: ChatMessage[]): ChatMessage[] {
+    const toolExecutionIds = new Set(
+        messages
+            .map(message => message.toolExecutionId)
+            .filter((id): id is string => !!id),
+    );
+    if (toolExecutionIds.size === 0) return messages;
+
+    const messageIds = new Set(messages.map(message => message.id));
+    const sessionIds = new Set(messages.map(message => message.sessionId));
+    const expanded = [...messages];
+    for (const message of _messagesCache) {
+        if (
+            messageIds.has(message.id)
+            || !sessionIds.has(message.sessionId)
+            || !message.toolExecutionId
+            || !toolExecutionIds.has(message.toolExecutionId)
+        ) continue;
+        messageIds.add(message.id);
+        expanded.push(message);
+    }
+    return expanded;
+}
+
 export function deleteChatMessage(messageId: string) {
     const targetMsg = _messagesCache.find(m => m.id === messageId);
     if (!targetMsg) return;
     const sessionId = targetMsg.sessionId;
 
-    _messagesCache = _messagesCache.filter(m => m.id !== messageId);
-    dbDeleteMessage(messageId);
+    const deletedMessages = expandToolExecutionDeleteSet([targetMsg]);
+    const deletedIds = new Set(deletedMessages.map(message => message.id));
+    _messagesCache = _messagesCache.filter(message => !deletedIds.has(message.id));
+    syncDeletedResponseBatchMetadata(deletedMessages);
+    dbDeleteMessagesByIds([...deletedIds]);
 
     // Recalculate the last message for the session to update the preview
     const lastMsg = getLastVisibleSessionMessage(sessionId);
@@ -982,7 +1407,7 @@ export function deleteChatMessage(messageId: string) {
         saveChatSessions(sessions);
     }
 
-    dispatchDeletedMessages([targetMsg]);
+    dispatchDeletedMessages(deletedMessages);
 }
 
 /** Delete a message and all messages after it in the same session. */
@@ -991,13 +1416,14 @@ export function deleteChatMessagesFrom(messageId: string) {
     if (!targetMsg) return;
     const sessionId = targetMsg.sessionId;
 
-    const deletedMessages = _messagesCache
-        .filter(m => m.sessionId === sessionId && compareChatMessages(m, targetMsg) >= 0);
-    const deletedIds = deletedMessages.map(m => m.id);
-
-    _messagesCache = _messagesCache.filter(m =>
-        m.sessionId !== sessionId || compareChatMessages(m, targetMsg) < 0
+    const deletedMessages = expandToolExecutionDeleteSet(
+        _messagesCache.filter(m => m.sessionId === sessionId && compareChatMessages(m, targetMsg) >= 0),
     );
+    const deletedIds = deletedMessages.map(m => m.id);
+    const deletedIdSet = new Set(deletedIds);
+
+    _messagesCache = _messagesCache.filter(m => !deletedIdSet.has(m.id));
+    syncDeletedResponseBatchMetadata(deletedMessages);
     dbDeleteMessagesByIds(deletedIds);
 
     const lastMsg = getLastVisibleSessionMessage(sessionId);
@@ -1023,13 +1449,15 @@ export function deleteChatMessagesByIds(sessionId: string, messageIds: string[])
     const targetIds = new Set(messageIds);
     if (targetIds.size === 0) return 0;
 
-    const deletedMessages = _messagesCache
-        .filter(m => m.sessionId === sessionId && targetIds.has(m.id));
+    const deletedMessages = expandToolExecutionDeleteSet(
+        _messagesCache.filter(m => m.sessionId === sessionId && targetIds.has(m.id)),
+    );
     const deletedIds = deletedMessages.map(m => m.id);
     if (deletedIds.length === 0) return 0;
 
     const deletedIdSet = new Set(deletedIds);
     _messagesCache = _messagesCache.filter(m => m.sessionId !== sessionId || !deletedIdSet.has(m.id));
+    syncDeletedResponseBatchMetadata(deletedMessages);
     dbDeleteMessagesByIds(deletedIds);
     reindexSessionMessageOrders(sessionId);
 
@@ -1108,6 +1536,9 @@ export function clearChatSessionMessages(sessionId: string) {
 function dispatchDeletedMessages(messages: ChatMessage[]): void {
     if (typeof window === "undefined" || messages.length === 0) return;
     window.dispatchEvent(new CustomEvent(CHAT_MESSAGES_DELETED_EVENT, { detail: { messages } }));
+    for (const message of messages) {
+        emitChatPluginEvent("message.deleted", { id: message.id, sessionId: message.sessionId });
+    }
 }
 
 export type ClearChatSessionToolHistoryResult = {
@@ -1117,6 +1548,7 @@ export type ClearChatSessionToolHistoryResult = {
 
 function isToolHistoryMessage(msg: ChatMessage): boolean {
     return msg.role === "tool"
+        || msg.mediaType === "tool_call"
         || msg.mediaType === "tool_result"
         || msg.mediaType === "tool_notice"
         || !!msg.nativeToolResult;
@@ -1131,9 +1563,10 @@ function hasNativeToolReplayMetadata(msg: ChatMessage): boolean {
 function hasVisibleMessagePayload(msg: ChatMessage): boolean {
     return !!msg.content.trim()
         || !!msg.mediaUrl
-        || (!!msg.mediaType && msg.mediaType !== "tool_result" && msg.mediaType !== "tool_notice")
+        || (!!msg.mediaType && msg.mediaType !== "tool_call" && msg.mediaType !== "tool_result" && msg.mediaType !== "tool_notice")
         || !!msg.statusPanel?.trim()
         || !!msg.innerMonologue?.trim()
+        || !!msg.reasoningText?.trim()
         || !!msg.stateValues?.length;
 }
 
@@ -1171,6 +1604,10 @@ export function clearChatSessionToolHistory(sessionId: string): ClearChatSession
     _messagesCache = _messagesCache
         .filter(msg => msg.sessionId !== sessionId || !deletedIds.has(msg.id))
         .map(msg => cleanedById.get(msg.id) || msg);
+
+    if (deletedIds.size > 0) {
+        syncDeletedResponseBatchMetadata(sessionMessages.filter(message => deletedIds.has(message.id)));
+    }
 
     if (deletedIds.size > 0) dbDeleteMessagesByIds([...deletedIds]);
     if (cleanedMessages.length > 0) dbPutMessages(cleanedMessages);
@@ -1297,6 +1734,8 @@ export function updateChatMessage(
         saveChatSessions(sessions);
     }
 
+    emitChatPluginEvent("message.updated", { id: messageId, patch });
+
     return updated;
 }
 
@@ -1401,7 +1840,9 @@ export function replaceMessageWithParts(
             editableResponseText: original.editableResponseText,
             statusPanel: i === 0 ? original.statusPanel : undefined,
             innerMonologue: i === 0 ? original.innerMonologue : undefined,
+            reasoningText: i === 0 ? original.reasoningText : undefined,
             stateValues: i === 0 ? original.stateValues : undefined,
+            freshStateValues: i === 0 ? original.freshStateValues : undefined,
             followUpIndex: original.followUpIndex,
             senderCharacterId: original.senderCharacterId,
             senderName: original.senderName,
@@ -1424,7 +1865,12 @@ export function replaceResponseBatchWithParts(
     options?: {
         statusPanel?: string;
         innerMonologue?: string;
+        reasoningText?: string;
         stateValues?: StateValue[];
+        freshStateValues?: StateValue[];
+        /** 面板挂在第几条（缺省第 0 条；调用方跳过拍一拍/通话留痕这类不显示面板的消息） */
+        metaPartIndex?: number;
+        toolCallContent?: string;
     },
 ): ChatMessage[] {
     if (parts.length === 0) return [];
@@ -1444,7 +1890,7 @@ export function replaceResponseBatchWithParts(
     dbDeleteMessagesByIds(deletedIds);
 
     const baseTime = new Date(firstMessage.createdAt).getTime();
-    const newMessages: ChatMessage[] = parts.map((part, index) => ({
+    const visibleMessages: ChatMessage[] = parts.map((part, index) => ({
         id: createMessageId(),
         sessionId,
         role: firstMessage.role,
@@ -1459,13 +1905,35 @@ export function replaceResponseBatchWithParts(
         rawResponseText,
         responseRoundId: firstMessage.responseRoundId,
         editableResponseText: firstMessage.editableResponseText,
-        statusPanel: index === 0 ? options?.statusPanel : undefined,
-        innerMonologue: index === 0 ? options?.innerMonologue : undefined,
-        stateValues: index === 0 ? options?.stateValues : undefined,
+        statusPanel: index === (options?.metaPartIndex ?? 0) ? options?.statusPanel : undefined,
+        innerMonologue: index === (options?.metaPartIndex ?? 0) ? options?.innerMonologue : undefined,
+        reasoningText: index === (options?.metaPartIndex ?? 0) ? options?.reasoningText : undefined,
+        stateValues: index === (options?.metaPartIndex ?? 0) ? options?.stateValues : undefined,
+        freshStateValues: index === (options?.metaPartIndex ?? 0) ? options?.freshStateValues : undefined,
         followUpIndex: firstMessage.followUpIndex,
         senderCharacterId: firstMessage.senderCharacterId,
         senderName: firstMessage.senderName,
     }));
+    const toolCallContent = options?.toolCallContent?.trim();
+    const toolCallMessage: ChatMessage | undefined = toolCallContent
+        ? {
+            id: createMessageId(),
+            sessionId,
+            role: "assistant",
+            content: toolCallContent,
+            mediaType: "tool_call",
+            status: firstMessage.status,
+            createdAt: new Date(baseTime + parts.length).toISOString(),
+            order: baseOrder + parts.length * 0.001,
+            responseBatchId,
+            responseRoundId: firstMessage.responseRoundId,
+            editableResponseText: firstMessage.editableResponseText,
+            followUpIndex: firstMessage.followUpIndex,
+            senderCharacterId: firstMessage.senderCharacterId,
+            senderName: firstMessage.senderName,
+        }
+        : undefined;
+    const newMessages = toolCallMessage ? [...visibleMessages, toolCallMessage] : visibleMessages;
 
     _messagesCache.splice(insertIdx, 0, ...newMessages);
     dbPutMessages(newMessages);
@@ -1501,7 +1969,9 @@ export function replaceGroupResponseRound(
         responseBatchId?: string;
         statusPanel?: string;
         innerMonologue?: string;
+        reasoningText?: string;
         stateValues?: StateValue[];
+        freshStateValues?: StateValue[];
         senderCharacterId?: string;
         senderName?: string;
     }>,
@@ -1540,7 +2010,9 @@ export function replaceGroupResponseRound(
         editableResponseText,
         statusPanel: msg.statusPanel,
         innerMonologue: msg.innerMonologue,
+        reasoningText: msg.reasoningText,
         stateValues: msg.stateValues,
+        freshStateValues: msg.freshStateValues,
         followUpIndex: firstMessage.followUpIndex,
         senderCharacterId: msg.senderCharacterId,
         senderName: msg.senderName,

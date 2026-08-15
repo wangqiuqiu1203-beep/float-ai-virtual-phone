@@ -136,6 +136,9 @@ export type VoiceApiConfig = {
     model?: string;
     sttModel?: string;
     defaultVoice: string;
+    languageBoost?: string;
+    /** Minimax voice_setting.speed. Missing values keep the legacy 1.0x behavior. */
+    speechSpeed?: number;
     customVoices?: { id: string; name: string; createdAt?: number }[];
     enableSTT: boolean;
     enableTTS: boolean;
@@ -246,6 +249,10 @@ export type BindingConfig = {
     embeddingApiConfigId?: string;
     /** Auxiliary API: used by the mascot assistant (global, not per-character) */
     mascotApiConfigId?: string;
+    /** Auxiliary API: used by the QA workshop agent (global, not per-character) */
+    qaApiConfigId?: string;
+    /** Auxiliary API: used to translate reasoning/chain-of-thought text (global, not per-character) */
+    reasoningTranslateApiConfigId?: string;
 };
 
 // --- Chat Toolbox ---

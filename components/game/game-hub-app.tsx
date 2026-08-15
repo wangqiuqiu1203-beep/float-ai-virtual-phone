@@ -1,7 +1,7 @@
 "use client";
 
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ChevronDown,
@@ -44,13 +44,17 @@ import {
   uploadGameHallAsset,
 } from "@/lib/game-hall-client";
 import { useAccount } from "@/lib/account-context";
+import { OnlineRoomConnection, onlineCloudApi } from "@/lib/online-room-client";
+import { submitContentReport } from "@/lib/moderation-client";
 import { buildGameRolePackage, callGameLLM } from "@/lib/game-engine";
+import { downloadFile } from "@/lib/download-utils";
 import {
   createDefaultGameDraft,
   deleteGameProjectionEvent,
   deleteInstalledGame,
   getGameCatalog,
   installGameTemplate,
+  upsertLocalTestGame,
   loadGameDrafts,
   loadGameSave,
   loadGameState,
@@ -84,6 +88,8 @@ import type { LLMMessage } from "@/lib/llm-prompt-assembler";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { incrementEventCounter } from "@/lib/memory-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
+import { getPwaHostedSafeArea, PWA_DISPLAY_MODE_CHANGED_EVENT } from "@/lib/pwa-display-mode";
+import { IFRAME_ERROR_CAPTURE_SCRIPT } from "@/lib/qa-iframe-error-bridge";
 
 type GameMainView = "hall" | "library" | "studio";
 type GameStudioMode = "published" | "drafts";
@@ -428,9 +434,33 @@ ${body}
       }, 45000);
     });
   }
+  var eventHandlers = {};
   window.addEventListener('message', function(event){
     var data = event.data || {};
-    if (data.source !== 'ai-phone-game-host' || data.id !== frameId || !data.requestId) return;
+    if (data.source !== 'ai-phone-game-host' || data.id !== frameId) return;
+    if (data.type === 'layout.safe-area' && data.safeArea) {
+      var safeArea = data.safeArea;
+      var root = document.documentElement;
+      root.style.setProperty('--ai-phone-game-safe-top', String(safeArea.top || '0px'));
+      root.style.setProperty('--ai-phone-game-safe-right', String(safeArea.right || '0px'));
+      root.style.setProperty('--ai-phone-game-safe-bottom', String(safeArea.bottom || '0px'));
+      root.style.setProperty('--ai-phone-game-safe-left', String(safeArea.left || '0px'));
+      root.style.setProperty('--ai-phone-game-bar-top', String(safeArea.barTop || '0px'));
+      root.style.setProperty('--ai-phone-game-bar-height', String(safeArea.barHeight || '0px'));
+      root.style.setProperty('--ai-phone-game-bar-clear-left', String(safeArea.barClearLeft || '0px'));
+      root.style.setProperty('--ai-phone-game-bar-clear-right', String(safeArea.barClearRight || '0px'));
+      window.dispatchEvent(new CustomEvent('aiphone:safe-area-change', { detail: safeArea }));
+      return;
+    }
+    if (data.type === 'event' && data.event) {
+      var handlers = (eventHandlers[data.event] || []).concat(eventHandlers['*'] || []);
+      handlers.forEach(function(handler){
+        Promise.resolve().then(function(){ return handler(data.payload, data.event); })
+          .catch(function(err){ setTimeout(function(){ throw err; }, 0); });
+      });
+      return;
+    }
+    if (!data.requestId) return;
     var item = pending[data.requestId];
     if (!item) return;
     delete pending[data.requestId];
@@ -438,6 +468,40 @@ ${body}
     else item.reject(new Error(data.error || 'AiPhoneGame request failed'));
   });
   var api = {
+    on: function(eventName, handler){
+      var key = String(eventName || '').trim();
+      if (!key || typeof handler !== 'function') throw new Error('AiPhoneGame.on 需要事件名和回调函数');
+      (eventHandlers[key] = eventHandlers[key] || []).push(handler);
+      return function(){
+        eventHandlers[key] = (eventHandlers[key] || []).filter(function(item){ return item !== handler; });
+      };
+    },
+    off: function(eventName, handler){
+      var key = String(eventName || '').trim();
+      eventHandlers[key] = (eventHandlers[key] || []).filter(function(item){ return item !== handler; });
+    },
+    room: {
+      create: function(payload){ return request('room.create', payload || {}); },
+      join: function(payload){ return request('room.join', payload || {}); },
+      current: function(){ return request('room.current'); },
+      send: function(payload){ return request('room.send', { payload: payload }); },
+      setState: function(state){ return request('room.setState', { state: state }); },
+      getState: function(){ return request('room.getState'); },
+      players: function(){ return request('room.players'); },
+      kick: function(userId){ return request('room.kick', { userId: userId }); },
+      close: function(){ return request('room.close'); },
+      leave: function(){ return request('room.leave'); },
+      report: function(reason){ return request('room.report', { reason: reason }); }
+    },
+    cloud: {
+      put: function(payload){ return request('cloud.put', payload || {}); },
+      get: function(payload){ return request('cloud.get', typeof payload === 'string' ? { id: payload } : (payload || {})); },
+      list: function(payload){ return request('cloud.list', payload || {}); },
+      update: function(payload){ return request('cloud.update', payload || {}); },
+      delete: function(payload){ return request('cloud.delete', typeof payload === 'string' ? { id: payload } : (payload || {})); },
+      takeRandom: function(payload){ return request('cloud.takeRandom', payload || {}); },
+      report: function(payload){ return request('cloud.report', payload || {}); }
+    },
     listAvailableCharacters: function(){ return request('listAvailableCharacters'); },
     getRoleSlots: function(){ return request('getRoleSlots'); },
     submitRoleAssignments: function(assignments){ return request('submitRoleAssignments', assignments || {}); },
@@ -458,9 +522,9 @@ ${body}
 </script>`;
 
   if (/<body[\s>]/i.test(base)) {
-    return base.replace(/<body([^>]*)>/i, `<body$1>${bridge}`);
+    return base.replace(/<body([^>]*)>/i, `<body$1>${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}`);
   }
-  return `${bridge}${base}`;
+  return `${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}${base}`;
 }
 
 function GameIframe({
@@ -468,15 +532,68 @@ function GameIframe({
   title,
   allowExternalControl,
   onBridgeRequest,
+  registerEventSender,
 }: {
   html: string;
   title: string;
   allowExternalControl: boolean;
   onBridgeRequest: (action: string, payload: unknown) => Promise<unknown> | unknown;
+  registerEventSender?: (sender: ((event: string, payload: unknown) => void) | null) => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [frameId] = useState(() => `game_frame_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const srcDoc = useMemo(() => createGameFrameSrcDoc(html, frameId), [frameId, html]);
+  const syncHostedSafeArea = useCallback(() => {
+    const frame = iframeRef.current;
+    if (!frame) return;
+    // 实测悬浮返回钮几何：top 取其下沿（整体让位），bar* 取整行位置和左侧
+    // 水平占位（供想与返回钮同排摆按钮的游戏贴行对齐）；找不到时退回估算值
+    let measured;
+    const backBtn = document.querySelector(".game-runtime-floating-back");
+    if (backBtn) {
+      const backRect = backBtn.getBoundingClientRect();
+      const frameRect = frame.getBoundingClientRect();
+      if (backRect.height > 0) {
+        measured = {
+          topPx: backRect.bottom - frameRect.top + 8,
+          barTopPx: backRect.top - frameRect.top,
+          barHeightPx: backRect.height,
+          barClearLeftPx: backRect.right - frameRect.left + 8,
+        };
+      }
+    }
+    frame.contentWindow?.postMessage({
+      source: "ai-phone-game-host",
+      type: "layout.safe-area",
+      id: frameId,
+      safeArea: getPwaHostedSafeArea("game", false, measured),
+    }, "*");
+  }, [frameId]);
+
+  useEffect(() => {
+    window.addEventListener(PWA_DISPLAY_MODE_CHANGED_EVENT, syncHostedSafeArea);
+    document.addEventListener("fullscreenchange", syncHostedSafeArea);
+    window.addEventListener("pageshow", syncHostedSafeArea);
+    return () => {
+      window.removeEventListener(PWA_DISPLAY_MODE_CHANGED_EVENT, syncHostedSafeArea);
+      document.removeEventListener("fullscreenchange", syncHostedSafeArea);
+      window.removeEventListener("pageshow", syncHostedSafeArea);
+    };
+  }, [syncHostedSafeArea]);
+
+  useEffect(() => {
+    if (!registerEventSender) return;
+    registerEventSender((event, payload) => {
+      iframeRef.current?.contentWindow?.postMessage({
+        source: "ai-phone-game-host",
+        type: "event",
+        id: frameId,
+        event,
+        payload,
+      }, "*");
+    });
+    return () => registerEventSender(null);
+  }, [frameId, registerEventSender]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -522,6 +639,7 @@ function GameIframe({
       className="game-hub-frame"
       sandbox={allowExternalControl ? "allow-scripts allow-same-origin" : "allow-scripts"}
       allow="autoplay"
+      onLoad={syncHostedSafeArea}
       srcDoc={srcDoc}
     />
   );
@@ -635,7 +753,7 @@ function draftFromTemplate(template: GameTemplate): GameTemplateDraft {
   };
 }
 
-export function GameHubApp({ onClose }: { onClose: () => void }) {
+export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; autoOpenLocalId?: string }) {
   const { account } = useAccount();
   const [mainView, setMainView] = useState<GameMainView>("hall");
   const [studioMode, setStudioMode] = useState<GameStudioMode>("drafts");
@@ -643,6 +761,15 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
   const [communityGames, setCommunityGames] = useState<GameTemplate[]>([]);
   const [communityLoading, setCommunityLoading] = useState(false);
   const [communityError, setCommunityError] = useState<string | null>(null);
+  const [communityErrorDialog, setCommunityErrorDialog] = useState<string | null>(null);
+  const dismissedCommunityErrorRef = useRef<string | null>(null);
+  // 云端同步失败改为一次性弹窗（同一条错误只弹一次），不再常驻横幅——自部署无云端时界面保持干净
+  useEffect(() => {
+    if (communityError && dismissedCommunityErrorRef.current !== communityError) {
+      dismissedCommunityErrorRef.current = communityError;
+      setCommunityErrorDialog(communityError);
+    }
+  }, [communityError]);
   const [notice, setNotice] = useState<GameNotice | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<GameTemplate | null>(null);
   const [creatorPageOpen, setCreatorPageOpen] = useState(false);
@@ -650,6 +777,8 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
   const [drafts, setDrafts] = useState<GameHallDraft[]>(() => loadGameDrafts());
   const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
+  // 当前编辑的草稿来自资源集市时是集市路径，否则 null。别人的作品只能本机试玩，不能发布到大厅。
+  const [editingImportedFrom, setEditingImportedFrom] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [publishAnonymously, setPublishAnonymously] = useState(false);
   const [runtimeGame, setRuntimeGame] = useState<GameInstalledItem | null>(null);
@@ -666,6 +795,19 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
   const [commentMenu, setCommentMenu] = useState<{ template: GameTemplate; comment: GameComment; x: number; y: number } | null>(null);
   const commentPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commentPressTriggeredRef = useRef(false);
+  const gameRoomRef = useRef<OnlineRoomConnection | null>(null);
+  const gameEventSenderRef = useRef<((event: string, payload: unknown) => void) | null>(null);
+  const registerGameEventSender = useCallback((sender: ((event: string, payload: unknown) => void) | null) => {
+    gameEventSenderRef.current = sender;
+  }, []);
+  const postGameEvent = useCallback((event: string, payload: unknown) => {
+    gameEventSenderRef.current?.(event, payload);
+  }, []);
+  // 组件卸载兜底：退房（房主退房 = 关房）
+  useEffect(() => () => {
+    gameRoomRef.current?.leave();
+    gameRoomRef.current = null;
+  }, []);
   const commentPressPosRef = useRef<{ x: number; y: number } | null>(null);
   const [submittingCommentIds, setSubmittingCommentIds] = useState<Record<string, boolean>>({});
   const [deletingCommentIds, setDeletingCommentIds] = useState<Record<string, boolean>>({});
@@ -759,6 +901,11 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
   const editingTemplate = useMemo(
     () => editingTemplateId ? communityGames.find(item => item.id === editingTemplateId) ?? null : null,
     [communityGames, editingTemplateId],
+  );
+  // 正在编辑的草稿是否已关联发布条目：关联时发布按钮显示「更新发布」（发布=同步更新原条目）
+  const editingDraftLinked = useMemo(
+    () => editingDraftId ? Boolean(drafts.find(item => item.id === editingDraftId)?.publishedTemplateId) : false,
+    [drafts, editingDraftId],
   );
 
   useEffect(() => {
@@ -1126,7 +1273,22 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
     setSelectedTemplate(null);
   }
 
+  // 工坊预览等场景：带 autoOpenLocalId 打开时，挂载后直接进入该游戏运行时
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (!autoOpenLocalId || autoOpenedRef.current) return;
+    const item = loadGameState().installedGames.find(installed => installed.localId === autoOpenLocalId);
+    if (!item) return;
+    autoOpenedRef.current = true;
+    setMainView("studio");
+    setStudioMode("drafts");
+    openRuntime(item);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenLocalId]);
+
   function closeRuntime(): void {
+    gameRoomRef.current?.leave();
+    gameRoomRef.current = null;
     setRuntimeGame(null);
     setRuntimeStage(null);
     setAdvancedAllowed(false);
@@ -1164,6 +1326,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
 
   function resetDraft(): void {
     setEditingDraftId(null);
+    setEditingImportedFrom(null);
     setEditingTemplateId(null);
     setAdvancedStudioOpen(false);
     setPublishAnonymously(false);
@@ -1192,23 +1355,36 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
     setDraft(normalizedDraft);
     setDrafts(current => {
       const existing = current.find(item => item.id === id);
+      // 编辑已发布游戏时存草稿：写入关联，草稿标签显示「已发布」，之后发布即同步更新原条目
+      const publishedTemplateId = editingTemplate?.id || existing?.publishedTemplateId;
       return saveGameDrafts([
         {
           id,
           title,
           draft: normalizedDraft,
+          publishedTemplateId,
+          // 关联草稿存了新内容但还没提交更新：卡片在「已发布」旁提示有未发布改动
+          hasUnpublishedChanges: publishedTemplateId ? true : undefined,
+          // 来源标记跟着草稿走：改了内容再存也洗不掉，否则禁发布形同虚设
+          importedFrom: editingImportedFrom || existing?.importedFrom,
           createdAt: existing?.createdAt || now,
           updatedAt: now,
         },
         ...current.filter(item => item.id !== id),
       ]);
     });
+    // 从「修改已发布」进入的存草稿：转入草稿编辑模式，后续发布走草稿关联（同步更新原条目）
+    if (editingTemplate?.id) {
+      setEditingTemplateId(null);
+      setEditingDraftId(id);
+    }
     showNotice("success", "草稿已保存");
   }
 
   function editDraft(item: GameHallDraft): void {
     setStudioMenuId(null);
     setEditingDraftId(item.id);
+    setEditingImportedFrom(item.importedFrom || null);
     setEditingTemplateId(null);
     setDraft(item.draft);
     setAdvancedStudioOpen(parseGameRoleSlots(item.draft.roleSlotsText).length > 0);
@@ -1224,6 +1400,70 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
     showNotice("info", "草稿已删除");
   }
 
+  // 导出草稿为 JSON 文件（blob 下载，不触发页面刷新），可发给别人从草稿箱「从文件导入」
+  // 已发布游戏直接导出为草稿文件（拉全量模板转换，不经过创建表单）
+  async function exportPublishedGameFile(template: GameTemplate): Promise<void> {
+    try {
+      const fullTemplate = await ensureFullGameTemplate(template);
+      const payload = {
+        type: "ai-phone-game-draft",
+        version: 1,
+        title: fullTemplate.title,
+        draft: draftFromTemplate(fullTemplate),
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      await downloadFile(blob, `${fullTemplate.title.trim() || "游戏草稿"}.json`);
+      showNotice("success", "已导出为草稿文件");
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "导出失败");
+    }
+  }
+
+  async function exportDraftFile(item: GameHallDraft): Promise<void> {
+    try {
+      // 带上来源标记：集市来的作品导出再导入依然禁发布，不能靠转一手洗掉出处
+      const payload = { type: "ai-phone-game-draft", version: 1, title: item.title, draft: item.draft, importedFrom: item.importedFrom };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      await downloadFile(blob, `${item.title.trim() || "游戏草稿"}.json`);
+      showNotice("success", "草稿已导出为文件");
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "导出失败");
+    }
+  }
+
+  // 导入草稿 JSON：整张创建表单自动填好（与「上传 HTML」共用一个入口，按扩展名分流）
+  async function importDraftIntoForm(file: File): Promise<void> {
+    try {
+      const payload = JSON.parse(await file.text()) as { type?: string; draft?: Record<string, unknown>; title?: string; importedFrom?: unknown };
+      if (payload?.type !== "ai-phone-game-draft" || !payload.draft || typeof payload.draft !== "object") {
+        throw new Error("不是有效的游戏草稿文件（需要从草稿箱「导出文件」生成）");
+      }
+      const importedFrom = typeof payload.importedFrom === "string" && payload.importedFrom.trim()
+        ? payload.importedFrom.trim().slice(0, 400)
+        : null;
+      // 只吸收与默认草稿同名同类型的字段，忽略其余内容
+      const base = createDefaultGameDraft();
+      const incoming = payload.draft;
+      const importedDraft = { ...base } as Record<string, unknown>;
+      for (const key of Object.keys(base)) {
+        const value = incoming[key];
+        if (typeof value === typeof (base as Record<string, unknown>)[key]) importedDraft[key] = value;
+      }
+      const nextDraft = importedDraft as GameTemplateDraft;
+      setEditingDraftId(null);
+      setEditingImportedFrom(importedFrom);
+      setEditingTemplateId(null);
+      setDraft(nextDraft);
+      setAdvancedStudioOpen(parseGameRoleSlots(nextDraft.roleSlotsText).length > 0);
+      const title = (typeof payload.title === "string" && payload.title.trim()) || nextDraft.title.trim() || "导入的游戏";
+      showNotice("success", importedFrom
+        ? `已导入草稿「${title}」，这是集市来的作品，可本机试玩但不能发布到大厅`
+        : `已导入草稿「${title}」，检查后可存草稿或发布`);
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "导入失败");
+    }
+  }
+
   async function editPublished(template: GameTemplate): Promise<void> {
     let fullTemplate = template;
     try {
@@ -1235,6 +1475,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
     setStudioMenuId(null);
     setEditingTemplateId(fullTemplate.id);
     setEditingDraftId(null);
+    setEditingImportedFrom(null);
     setDraft(draftFromTemplate(fullTemplate));
     setAdvancedStudioOpen(fullTemplate.roleSlots.length > 0);
     setPublishAnonymously(displayGameAuthorName(fullTemplate.authorName) === "匿名" && !fullTemplate.authorAvatar);
@@ -1253,9 +1494,13 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
 
   async function uploadGameHtmlFile(file: File | null): Promise<void> {
     if (!file) return;
+    if (/\.json$/i.test(file.name) || file.type === "application/json") {
+      await importDraftIntoForm(file);
+      return;
+    }
     const isHtmlFile = /\.(html?|xhtml)$/i.test(file.name) || file.type === "text/html";
     if (!isHtmlFile) {
-      showNotice("error", "请选择 HTML 文件");
+      showNotice("error", "请选择 HTML 或草稿 JSON 文件");
       return;
     }
     try {
@@ -1362,40 +1607,69 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
     return localId.startsWith(GAME_PREVIEW_LOCAL_ID_PREFIX);
   }
 
-  function previewDraft(): void {
+  function localTestDraft(): void {
     try {
-      const template = createTemplateFromDraft(draft, state, editingTemplate);
       const now = new Date().toISOString();
-      previewGameSaveRef.current = null;
-      openRuntime({
-        localId: `${GAME_PREVIEW_LOCAL_ID_PREFIX}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        remoteTemplateId: template.id,
-        installedAt: now,
-        templateSnapshot: { ...template, source: "local", updatedAt: now },
-        roleAssignments: [],
-        status: "installed",
-        playCount: 0,
-      });
+      const template = { ...createTemplateFromDraft(draft, state, editingTemplate), source: "local" as const, updatedAt: now };
+      // 稳定 key：优先用草稿 id；若是未保存的新草稿，先存草稿再测，保证重复测试幂等
+      let draftId = editingDraftId;
+      if (!draftId) {
+        draftId = createDraftId();
+        const title = draft.title.trim() || "未命名游戏";
+        setEditingDraftId(draftId);
+        setDrafts(current => saveGameDrafts([{ id: draftId as string, title, draft, importedFrom: editingImportedFrom || undefined, createdAt: now, updatedAt: now }, ...current]));
+      }
+      const result = upsertLocalTestGame(draftId, template);
+      if (!result.ok || !result.installedGame) {
+        showNotice("error", result.error || "当前草稿无法测试");
+        return;
+      }
+      setState(result.state);
+      openRuntime(result.installedGame);
     } catch (err) {
-      showNotice("error", err instanceof Error ? err.message : "当前草稿无法试玩");
+      showNotice("error", err instanceof Error ? err.message : "当前草稿无法测试");
     }
   }
 
   async function publishDraft(): Promise<void> {
+    // 集市导入的是别人的作品：本机随便玩，但不能借道这里发到共享大厅
+    if (editingImportedFrom) {
+      showNotice("error", "这是从资源集市导入的作品，只能本机试玩，不能发布到共享大厅");
+      return;
+    }
     setPublishing(true);
     try {
-      const template = await prepareTemplateForPublish(createTemplateFromDraft(draft, state, editingTemplate, {
+      // 关联发布：修改已发布模式用该模板；否则草稿带关联时解析出已发布条目 → 同步更新同一条目
+      let existingPublished = editingTemplate;
+      const linkedId = !existingPublished && editingDraftId
+        ? drafts.find(item => item.id === editingDraftId)?.publishedTemplateId
+        : undefined;
+      if (!existingPublished && linkedId) {
+        try {
+          const known = publishedGames.find(item => item.id === linkedId);
+          existingPublished = known ? await ensureFullGameTemplate(known) : await fetchGameHallTemplate(linkedId);
+        } catch {
+          existingPublished = null; // 大厅条目已不存在：退化为发布新条目，成功后改写关联
+        }
+      }
+      const template = await prepareTemplateForPublish(createTemplateFromDraft(draft, state, existingPublished, {
         anonymous: publishAnonymously,
         authorId: account.id,
         authorName: state.displayName,
         authorAvatar: state.avatarUrl,
       }));
-      const published = editingTemplate
+      const published = existingPublished
         ? await updateGameTemplate(template)
         : await publishGameTemplate(template);
       setCommunityGames(current => mergeTemplate(current, published));
+      // 发布后保留草稿并写入关联：草稿标签变「已发布」，下次发布即同步更新，不产生新条目
       if (editingDraftId) {
-        setDrafts(current => saveGameDrafts(current.filter(item => item.id !== editingDraftId)));
+        const now = new Date().toISOString();
+        setDrafts(current => saveGameDrafts(current.map(item =>
+          item.id === editingDraftId
+            ? { ...item, title: draft.title.trim() || item.title, draft, publishedTemplateId: published.id, hasUnpublishedChanges: undefined, updatedAt: now }
+            : item,
+        )));
       }
       setEditingDraftId(null);
       setEditingTemplateId(null);
@@ -1403,7 +1677,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
       setCreatorPageOpen(false);
       setCreatorGuideOpen(false);
       setMainView("studio");
-      showNotice("success", editingTemplate ? "游戏已同步修改" : "游戏已发布到共享大厅");
+      showNotice("success", existingPublished ? "游戏已同步修改" : "游戏已发布到共享大厅");
     } catch (err) {
       showNotice("error", err instanceof Error ? err.message : "发布失败");
     } finally {
@@ -1415,6 +1689,12 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
     try {
       await deleteGameTemplate({ id: template.id, authorId: template.authorId });
       setCommunityGames(current => current.filter(item => item.id !== template.id));
+      // 清掉指向该条目的草稿关联：标签回到「未发布」，之后发布会作为新条目
+      setDrafts(current => current.some(item => item.publishedTemplateId === template.id)
+        ? saveGameDrafts(current.map(item => item.publishedTemplateId === template.id
+          ? { ...item, publishedTemplateId: undefined, hasUnpublishedChanges: undefined }
+          : item))
+        : current);
       showNotice("success", "已从共享大厅删除");
     } catch (err) {
       showNotice("error", err instanceof Error ? err.message : "删除失败");
@@ -1638,6 +1918,130 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
         throw new Error("该游戏未获得高级游戏权限，不能读取角色包、调用模型或写入游戏记忆。");
       }
     };
+
+    if (action.startsWith("room.") || action.startsWith("cloud.")) {
+      const namespace = `game:${template.id}`;
+
+      if (action.startsWith("cloud.")) {
+        const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+        const cloudAction = action.slice("cloud.".length);
+        if (cloudAction === "report") {
+          const reportId = String(record.id ?? "").trim();
+          if (!reportId) throw new Error("cloud.report 缺少 id。");
+          await submitContentReport({
+            contentType: "online_doc",
+            contentId: reportId,
+            reason: String(record.reason ?? "").slice(0, 500),
+          });
+          return true;
+        }
+        if (!["put", "get", "list", "update", "delete", "takeRandom"].includes(cloudAction)) {
+          throw new Error(`未知云端动作：${action}`);
+        }
+        const response = await onlineCloudApi({
+          action: cloudAction,
+          namespace,
+          collection: record.collection,
+          id: record.id,
+          data: record.data,
+          sortKey: record.sortKey,
+          limit: record.limit,
+          mine: record.mine,
+          orderBy: record.orderBy,
+        });
+        if (cloudAction === "list") return response.docs;
+        if (cloudAction === "delete") return { deleted: response.deleted === true };
+        return response.doc ?? null;
+      }
+
+      const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      const publicRoomInfo = (connection: OnlineRoomConnection) => ({
+        id: connection.info.id,
+        code: connection.info.code,
+        title: connection.info.title,
+        maxPlayers: connection.info.maxPlayers,
+        meta: connection.info.meta,
+        hostUserId: connection.info.hostUserId,
+        hostName: connection.info.hostName,
+        isHost: connection.info.isHost,
+        selfUserId: connection.selfUserId,
+        selfName: connection.selfName,
+        players: connection.players(),
+      });
+      const current = gameRoomRef.current && !gameRoomRef.current.isClosed ? gameRoomRef.current : null;
+
+      if (action === "room.create" || action === "room.join") {
+        if (current) {
+          current.leave();
+          gameRoomRef.current = null;
+        }
+        const events = {
+          onMessage: (message: { from: { userId: string; name: string }; payload: unknown; sentAt: number }) => {
+            postGameEvent("room.message", { from: message.from, payload: message.payload, sentAt: message.sentAt });
+          },
+          onPlayers: (players: unknown[]) => postGameEvent("room.players", { players }),
+          onState: (roomState: Record<string, unknown>) => postGameEvent("room.state", { state: roomState }),
+          onClosed: (reason: string) => {
+            gameRoomRef.current = null;
+            postGameEvent("room.closed", { reason });
+          },
+        };
+        const connection = action === "room.create"
+          ? await OnlineRoomConnection.create({
+            namespace,
+            title: typeof record.title === "string" ? record.title : template.title.slice(0, 80),
+            maxPlayers: Number(record.maxPlayers ?? 8) || 8,
+            meta: record.meta && typeof record.meta === "object" && !Array.isArray(record.meta)
+              ? record.meta as Record<string, unknown>
+              : {},
+          }, events)
+          : await OnlineRoomConnection.join({ namespace, code: String(record.code ?? "") }, events);
+        gameRoomRef.current = connection;
+        return publicRoomInfo(connection);
+      }
+
+      if (action === "room.current") {
+        return current ? { ...publicRoomInfo(current), state: current.state() } : null;
+      }
+      if (action === "room.leave") {
+        if (current) {
+          current.leave();
+          gameRoomRef.current = null;
+        }
+        return { ok: true };
+      }
+      if (!current) throw new Error("当前没有已连接的联机房间，请先 room.create 或 room.join。");
+      if (action === "room.report") {
+        await submitContentReport({
+          contentType: "online_room",
+          contentId: current.info.id,
+          reason: String(record.reason ?? "").slice(0, 500),
+        });
+        return true;
+      }
+      if (action === "room.send") {
+        await current.send(record.payload ?? null);
+        return { ok: true };
+      }
+      if (action === "room.setState") {
+        const roomState = record.state ?? record.data;
+        if (!roomState || typeof roomState !== "object" || Array.isArray(roomState)) throw new Error("room.setState 需要对象 state。");
+        await current.setState(roomState as Record<string, unknown>);
+        return { ok: true };
+      }
+      if (action === "room.getState") return current.state();
+      if (action === "room.players") return current.players();
+      if (action === "room.kick") {
+        await current.kick(String(record.userId ?? ""));
+        return { ok: true };
+      }
+      if (action === "room.close") {
+        await current.close();
+        gameRoomRef.current = null;
+        return { ok: true };
+      }
+      throw new Error(`未知联机动作：${action}`);
+    }
 
     if (action === "listAvailableCharacters") {
       return characters.map(character => ({
@@ -2066,6 +2470,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
             <div className="game-studio-card-menu-pop" onClick={event => event.stopPropagation()}>
               <button type="button" onClick={() => { setStudioMenuId(null); void editPublished(template); }}>编辑</button>
               <button type="button" onClick={() => { setStudioMenuId(null); openTemplateDetails(template); }}>查看详情</button>
+              <button type="button" onClick={() => { setStudioMenuId(null); void exportPublishedGameFile(template); }}>导出文件</button>
               <button type="button" className="is-danger" onClick={() => { setStudioMenuId(null); void deletePublished(template); }}>删除</button>
             </div>
           ) : null}
@@ -2093,7 +2498,10 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
         <div className="game-studio-list-copy">
           <div>
             <strong>{item.title}</strong>
-            <span>草稿</span>
+            {item.importedFrom
+              ? <span data-pub="no">集市作品·不可发布</span>
+              : <span data-pub={item.publishedTemplateId ? "yes" : "no"}>{item.publishedTemplateId ? "已发布" : "未发布"}</span>}
+            {item.publishedTemplateId && item.hasUnpublishedChanges ? <i className="game-dirty-hint">有未发布改动</i> : null}
           </div>
           <time>{formatGameDate(item.updatedAt)}</time>
         </div>
@@ -2111,6 +2519,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
           {menuOpen ? (
             <div className="game-studio-card-menu-pop" onClick={event => event.stopPropagation()}>
               <button type="button" onClick={() => { setStudioMenuId(null); editDraft(item); }}>编辑</button>
+              <button type="button" onClick={() => { setStudioMenuId(null); void exportDraftFile(item); }}>导出文件</button>
               <button type="button" className="is-danger" onClick={() => { setStudioMenuId(null); deleteDraft(item.id); }}>删除</button>
             </div>
           ) : null}
@@ -2223,6 +2632,26 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
             <div className="game-modal-tags">
               {displayTags.map(tag => <span key={tag}>#{tag}</span>)}
             </div>
+          ) : null}
+          {template.source === "community" ? (
+            <button
+              type="button"
+              className="game-detail-report-link"
+              style={{ border: "none", background: "none", color: "var(--text-tertiary, #999)", fontSize: 11, alignSelf: "flex-end", padding: "2px 4px", cursor: "pointer" }}
+              onClick={() => {
+                void submitContentReport({
+                  contentType: "game",
+                  contentId: template.id,
+                  preview: `${template.title} — ${gameDisplayDescription(template) || ""}`.slice(0, 200),
+                  ownerId: template.authorId || "",
+                  ownerName: template.authorName || "",
+                })
+                  .then(() => showNotice("success", "已举报，管理员会尽快处理"))
+                  .catch(err => showNotice("error", err instanceof Error ? err.message : "举报失败"));
+              }}
+            >
+              举报该游戏
+            </button>
           ) : null}
           {GAME_HALL_COMMENTS_ENABLED ? (
             <div className={`game-comments game-comments--modal ${commentsExpanded ? "is-open" : ""}`}>
@@ -2372,8 +2801,6 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
       </header>
 
       <main className={`game-hub-scroll ${creatorPageOpen || selectedTemplate ? "game-hub-scroll--page" : ""} ${selectedTemplate ? "game-hub-scroll--detail" : ""}`}>
-        {communityError ? <div className="game-error">{communityError}</div> : null}
-
         {selectedTemplate ? renderTemplateDetailPage(selectedTemplate) : null}
 
         {!selectedTemplate && !creatorPageOpen && mainView === "hall" ? (
@@ -2518,6 +2945,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
                   </div>
                 )
               ) : null}
+
               </>
             ) : null}
 
@@ -2628,8 +3056,8 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
                     ref={htmlFileInputRef}
                     className="game-file-input"
                     type="file"
-                    accept=".html,.htm,text/html"
-                    aria-label="上传 HTML 文件"
+                    accept=".html,.htm,.json,text/html,application/json"
+                    aria-label="上传 HTML 或草稿文件"
                     onChange={event => {
                       const file = event.currentTarget.files?.[0] ?? null;
                       event.currentTarget.value = "";
@@ -2637,7 +3065,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
                     }}
                   />
                   <div className="game-html-import">
-                    <button type="button" className="game-soft-wide-button" onClick={() => htmlFileInputRef.current?.click()}><Upload size={14} /> 上传 HTML</button>
+                    <button type="button" className="game-soft-wide-button" onClick={() => htmlFileInputRef.current?.click()}><Upload size={14} /> 上传 HTML / 草稿</button>
                   </div>
                   <textarea value={draft.gameHtml} rows={18} spellCheck={false} onChange={event => updateDraft("gameHtml", event.target.value)} />
                 </div>
@@ -2667,27 +3095,36 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="game-studio-panel game-publish-actions-panel">
                   <div className="game-studio-actions">
-                    <button type="button" onClick={previewDraft}><Play size={14} /> 试玩</button>
+                    <button type="button" onClick={localTestDraft}><Play size={14} /> 本机测试</button>
                     <button type="button" onClick={saveDraft}><Archive size={14} /> 存草稿</button>
-                    <button type="button" className="is-primary" disabled={publishing} onClick={() => void publishDraft()}>
+                    <button type="button" className="is-primary" disabled={publishing || Boolean(editingImportedFrom)}
+                      title={editingImportedFrom ? "集市导入的作品只能本机试玩" : undefined}
+                      onClick={() => void publishDraft()}>
                       <Send size={14} />
-                      {publishing ? "同步中" : editingTemplate ? "保存修改" : "发布共享"}
+                      {editingImportedFrom ? "集市作品·不可发布" : publishing ? "同步中" : editingTemplate ? "保存修改" : editingDraftLinked ? "更新发布" : "发布共享"}
                     </button>
                   </div>
+                  {editingImportedFrom && (
+                    <p className="game-studio-hint">这是从资源集市导入的作品，可以本机试玩、改着自己用，但不能发布到共享大厅。</p>
+                  )}
                 </div>
-                <details className="game-advanced-details" open={advancedStudioOpen} onToggle={event => setAdvancedStudioOpen(event.currentTarget.open)}>
-                  <summary>高级设置：角色槽位与独立选择页</summary>
-                  <div className="game-studio-panel">
-                    <h3>角色槽位 JSON</h3>
-                    <p className="game-studio-hint">普通单文件游戏可以保持 []。只有需要宿主校验固定身份、最少/最多人数，或把选择页和游戏页拆开时才需要填写。</p>
-                    <textarea value={draft.roleSlotsText} rows={10} spellCheck={false} onChange={event => updateDraft("roleSlotsText", event.target.value)} />
-                  </div>
-                  <div className="game-studio-panel">
-                    <h3>独立角色选择 HTML</h3>
-                    <p className="game-studio-hint">只有上方角色槽位不为空时才会使用。普通模式不需要填写。</p>
-                    <textarea value={draft.pickerHtml} rows={12} spellCheck={false} onChange={event => updateDraft("pickerHtml", event.target.value)} />
-                  </div>
-                </details>
+                {/* 角色槽位属于旧的模板级选人通路（现行做法是游戏 HTML 内自行选人），
+                    入口不再对新草稿开放；仅在编辑已带槽位的存量作品时显示以保持兼容。 */}
+                {parseGameRoleSlots(draft.roleSlotsText).length > 0 ? (
+                  <details className="game-advanced-details" open={advancedStudioOpen} onToggle={event => setAdvancedStudioOpen(event.currentTarget.open)}>
+                    <summary>高级设置：角色槽位与独立选择页（旧版兼容）</summary>
+                    <div className="game-studio-panel">
+                      <h3>角色槽位 JSON</h3>
+                      <p className="game-studio-hint">该作品使用了旧版角色槽位机制，此处保留编辑能力。清空为 [] 后将改为游戏内自行选人。</p>
+                      <textarea value={draft.roleSlotsText} rows={10} spellCheck={false} onChange={event => updateDraft("roleSlotsText", event.target.value)} />
+                    </div>
+                    <div className="game-studio-panel">
+                      <h3>独立角色选择 HTML</h3>
+                      <p className="game-studio-hint">只有上方角色槽位不为空时才会使用。</p>
+                      <textarea value={draft.pickerHtml} rows={12} spellCheck={false} onChange={event => updateDraft("pickerHtml", event.target.value)} />
+                    </div>
+                  </details>
+                ) : null}
               </>
             ) : null}
           </section>
@@ -2824,6 +3261,33 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
         </div>
       ) : null}
 
+      {communityErrorDialog ? (
+        <div className="game-modal" role="presentation" onClick={() => setCommunityErrorDialog(null)}>
+          <section
+            className="game-modal-card"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="云端同步失败"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="game-modal-head">
+              <div>
+                <span>SYNC</span>
+                <strong>云端同步失败</strong>
+              </div>
+              <button type="button" aria-label="关闭" onClick={() => setCommunityErrorDialog(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="game-delete-copy">{communityErrorDialog}</p>
+            <p className="game-delete-copy">本地草稿、已装内容和本机测试不受影响；自部署未配置云端市场时可通过「导入文件」使用本地内容。</p>
+            <div className="game-modal-actions">
+              <button type="button" onClick={() => setCommunityErrorDialog(null)}>知道了</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {commentMenu ? (
         <div
           className="game-comment-menu-overlay"
@@ -2858,6 +3322,26 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
                 删除
               </button>
             ) : null}
+            <button
+              type="button"
+              role="menuitem"
+              className="game-comment-menu-btn"
+              onClick={() => {
+                const { comment } = commentMenu;
+                setCommentMenu(null);
+                void submitContentReport({
+                  contentType: "game_comment",
+                  contentId: comment.id,
+                  preview: comment.content.slice(0, 200),
+                  ownerId: comment.authorId || "",
+                  ownerName: comment.authorName || "",
+                })
+                  .then(() => showNotice("success", "已举报，管理员会尽快处理"))
+                  .catch(err => showNotice("error", err instanceof Error ? err.message : "举报失败"));
+              }}
+            >
+              举报
+            </button>
           </div>
         </div>
       ) : null}
@@ -3082,6 +3566,7 @@ export function GameHubApp({ onClose }: { onClose: () => void }) {
                 html={runtimeGame.templateSnapshot.gameHtml}
                 allowExternalControl={runtimeAllowExternal}
                 onBridgeRequest={handleBridgeRequest}
+                registerEventSender={registerGameEventSender}
               />
             ) : null}
           </section>

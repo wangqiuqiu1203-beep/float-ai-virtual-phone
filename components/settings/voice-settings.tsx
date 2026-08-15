@@ -17,6 +17,10 @@ const MINIMAX_BASE_URL_OPTIONS = [
 ];
 const DEFAULT_MINIMAX_BASE_URL = MINIMAX_BASE_URL_OPTIONS[0].baseUrl;
 const GLOBAL_MINIMAX_BASE_URL = MINIMAX_BASE_URL_OPTIONS[1].baseUrl;
+const MINIMAX_SPEED_MIN = 0.5;
+const MINIMAX_SPEED_MAX = 2.0;
+const MINIMAX_SPEED_STEP = 0.1;
+const DEFAULT_SPEECH_SPEED = 1.0;
 const VOICE_PROVIDER_OPTIONS = [
     { value: "OpenAI", label: "OpenAI TTS" },
     { value: "MinimaxCN", label: "Minimax 语音国内版" },
@@ -32,6 +36,7 @@ const DEFAULT_VOICE_CONFIGS: VoiceApiConfig[] = [
         baseUrl: DEFAULT_MINIMAX_BASE_URL,
         model: "speech-2.8-turbo",
         defaultVoice: "male-qn-qingse",
+        speechSpeed: DEFAULT_SPEECH_SPEED,
         enableSTT: true,
         enableTTS: true,
     }
@@ -48,6 +53,94 @@ const DEFAULT_MINIMAX_MODELS = [
     { id: "speech-01-turbo", name: "speech-01-turbo (速度快/性价比高)" },
 ];
 
+const MINIMAX_LANGUAGE_OPTIONS = [
+    { value: "", label: "不指定（保持默认）" },
+    { value: "auto", label: "自动识别" },
+    { value: "Chinese", label: "普通话" },
+    { value: "Chinese,Yue", label: "粤语" },
+    { value: "English", label: "英语" },
+    { value: "Arabic", label: "阿拉伯语" },
+    { value: "Russian", label: "俄语" },
+    { value: "Spanish", label: "西班牙语" },
+    { value: "French", label: "法语" },
+    { value: "Portuguese", label: "葡萄牙语" },
+    { value: "German", label: "德语" },
+    { value: "Turkish", label: "土耳其语" },
+    { value: "Dutch", label: "荷兰语" },
+    { value: "Ukrainian", label: "乌克兰语" },
+    { value: "Vietnamese", label: "越南语" },
+    { value: "Indonesian", label: "印尼语" },
+    { value: "Japanese", label: "日语" },
+    { value: "Italian", label: "意大利语" },
+    { value: "Korean", label: "韩语" },
+    { value: "Thai", label: "泰语" },
+    { value: "Polish", label: "波兰语" },
+    { value: "Romanian", label: "罗马尼亚语" },
+    { value: "Greek", label: "希腊语" },
+    { value: "Czech", label: "捷克语" },
+    { value: "Finnish", label: "芬兰语" },
+    { value: "Hindi", label: "印地语" },
+    { value: "Bulgarian", label: "保加利亚语" },
+    { value: "Danish", label: "丹麦语" },
+    { value: "Hebrew", label: "希伯来语" },
+    { value: "Malay", label: "马来语" },
+    { value: "Persian", label: "波斯语" },
+    { value: "Slovak", label: "斯洛伐克语" },
+    { value: "Swedish", label: "瑞典语" },
+    { value: "Croatian", label: "克罗地亚语" },
+    { value: "Filipino", label: "菲律宾语" },
+    { value: "Hungarian", label: "匈牙利语" },
+    { value: "Norwegian", label: "挪威语" },
+    { value: "Slovenian", label: "斯洛文尼亚语" },
+    { value: "Catalan", label: "加泰罗尼亚语" },
+    { value: "Nynorsk", label: "新挪威语" },
+    { value: "Tamil", label: "泰米尔语" },
+    { value: "Afrikaans", label: "南非荷兰语" },
+];
+
+const MINIMAX_PREVIEW_TEXT: Record<string, string> = {
+    Chinese: "你好，很高兴认识你。这是一段普通话试听。",
+    "Chinese,Yue": "大家好，我而家用紧粤语同你讲话，好开心认识你。",
+    English: "Hello, it is nice to meet you. This is an English voice preview.",
+    Arabic: "مرحبا، سعيد بلقائك. هذا اختبار صوتي باللغة العربية.",
+    Russian: "Здравствуйте, приятно познакомиться. Это пример русской речи.",
+    Spanish: "Hola, mucho gusto. Esta es una prueba de voz en español.",
+    French: "Bonjour, enchanté de vous rencontrer. Ceci est un aperçu de la voix française.",
+    Portuguese: "Olá, prazer em conhecer você. Esta é uma prévia de voz em português.",
+    German: "Hallo, schön Sie kennenzulernen. Dies ist eine deutsche Sprachprobe.",
+    Turkish: "Merhaba, tanıştığımıza memnun oldum. Bu bir Türkçe ses denemesidir.",
+    Dutch: "Hallo, leuk u te ontmoeten. Dit is een Nederlandse stemtest.",
+    Ukrainian: "Вітаю, приємно познайомитися. Це приклад українського мовлення.",
+    Vietnamese: "Xin chào, rất vui được gặp bạn. Đây là bản nghe thử tiếng Việt.",
+    Indonesian: "Halo, senang bertemu dengan Anda. Ini adalah contoh suara bahasa Indonesia.",
+    Japanese: "こんにちは、はじめまして。これは日本語の音声サンプルです。",
+    Italian: "Ciao, piacere di conoscerti. Questa è una prova vocale in italiano.",
+    Korean: "안녕하세요, 만나서 반갑습니다. 한국어 음성 미리 듣기입니다.",
+    Thai: "สวัสดี ยินดีที่ได้รู้จัก นี่คือตัวอย่างเสียงภาษาไทย",
+    Polish: "Dzień dobry, miło mi cię poznać. To jest polska próbka głosu.",
+    Romanian: "Bună, îmi pare bine să vă cunosc. Aceasta este o mostră de voce în limba română.",
+    Greek: "Γεια σας, χαίρομαι που σας γνωρίζω. Αυτό είναι ένα δείγμα ελληνικής φωνής.",
+    Czech: "Dobrý den, těší mě. Toto je ukázka českého hlasu.",
+    Finnish: "Hei, hauska tavata. Tämä on suomenkielinen ääninäyte.",
+    Hindi: "नमस्ते, आपसे मिलकर खुशी हुई। यह हिंदी आवाज़ का नमूना है।",
+    Bulgarian: "Здравейте, приятно ми е да се запознаем. Това е пример за български глас.",
+    Danish: "Hej, rart at møde dig. Dette er en dansk stemmeprøve.",
+    Hebrew: "שלום, נעים להכיר. זוהי דוגמת קול בעברית.",
+    Malay: "Helo, gembira bertemu dengan anda. Ini ialah contoh suara bahasa Melayu.",
+    Persian: "سلام، از آشنایی با شما خوشحالم. این یک نمونه صدای فارسی است.",
+    Slovak: "Dobrý deň, teší ma. Toto je ukážka slovenského hlasu.",
+    Swedish: "Hej, trevligt att träffas. Det här är ett svenskt röstprov.",
+    Croatian: "Pozdrav, drago mi je. Ovo je primjer hrvatskog glasa.",
+    Filipino: "Kumusta, ikinagagalak kitang makilala. Ito ay halimbawa ng boses sa Filipino.",
+    Hungarian: "Üdvözlöm, örülök, hogy találkoztunk. Ez egy magyar hangminta.",
+    Norwegian: "Hei, hyggelig å møte deg. Dette er en norsk stemmeprøve.",
+    Slovenian: "Pozdravljeni, veseli me. To je primer slovenskega glasu.",
+    Catalan: "Hola, encantat de conèixer-te. Aquesta és una mostra de veu en català.",
+    Nynorsk: "Hei, hyggeleg å møte deg. Dette er ei nynorsk stemmeprøve.",
+    Tamil: "வணக்கம், உங்களைச் சந்தித்ததில் மகிழ்ச்சி. இது ஒரு தமிழ் குரல் மாதிரி.",
+    Afrikaans: "Hallo, aangename kennis. Dit is 'n Afrikaanse stemvoorbeeld.",
+};
+
 const DEFAULT_MINIMAX_VOICES = [
     { id: "male-qn-qingse", name: "青涩青年音 (male-qn-qingse)" },
     { id: "female-shaonv", name: "少女音 (female-shaonv)" },
@@ -56,6 +149,10 @@ const DEFAULT_MINIMAX_VOICES = [
     { id: "Wise_Woman", name: "知性女音 (Wise_Woman)" },
     { id: "Friendly_Person", name: "亲切和蔼 (Friendly_Person)" },
     { id: "Calm_Woman", name: "冷静女音 (Calm_Woman)" },
+    { id: "Cantonese_GentleLady", name: "粤语温柔女声 (Cantonese_GentleLady)" },
+    { id: "Cantonese_PlayfulMan", name: "粤语活泼男声 (Cantonese_PlayfulMan)" },
+    { id: "Cantonese_CuteGirl", name: "粤语可爱女孩 (Cantonese_CuteGirl)" },
+    { id: "Cantonese_KindWoman", name: "粤语善良女声 (Cantonese_KindWoman)" },
 ];
 
 const DEFAULT_OPENAI_VOICES = [
@@ -98,7 +195,10 @@ function normalizeVoiceConfigs(configs: VoiceApiConfig[]): VoiceApiConfig[] {
             const baseUrl = MINIMAX_BASE_URL_OPTIONS.some(option => option.baseUrl === config.baseUrl)
                 ? config.baseUrl
                 : DEFAULT_MINIMAX_BASE_URL;
-            return { ...config, baseUrl };
+            const speechSpeed = typeof config.speechSpeed === "number" && Number.isFinite(config.speechSpeed)
+                ? Math.min(MINIMAX_SPEED_MAX, Math.max(MINIMAX_SPEED_MIN, config.speechSpeed))
+                : DEFAULT_SPEECH_SPEED;
+            return { ...config, baseUrl, speechSpeed };
         });
 }
 
@@ -167,6 +267,7 @@ export function VoiceSettings() {
             region: "",
             model: "speech-2.8-turbo",
             defaultVoice: "male-qn-qingse",
+            speechSpeed: DEFAULT_SPEECH_SPEED,
             enableSTT: true,
             enableTTS: true,
         };
@@ -211,6 +312,7 @@ export function VoiceSettings() {
             baseUrl: providerOption === "MinimaxGlobal" ? GLOBAL_MINIMAX_BASE_URL : DEFAULT_MINIMAX_BASE_URL,
             model: wasMinimax ? (current?.model || "speech-2.8-turbo") : "speech-2.8-turbo",
             defaultVoice: wasMinimax ? (current?.defaultVoice || "male-qn-qingse") : "male-qn-qingse",
+            speechSpeed: wasMinimax ? (current?.speechSpeed ?? DEFAULT_SPEECH_SPEED) : DEFAULT_SPEECH_SPEED,
         });
         if (!wasMinimax) {
             setManualModelIds(prev => ({ ...prev, [id]: false }));
@@ -418,8 +520,11 @@ export function VoiceSettings() {
         setPlayingVoiceId(config.id);
 
         try {
+            const previewText = config.provider === "Minimax" && config.languageBoost
+                ? MINIMAX_PREVIEW_TEXT[config.languageBoost] || "你好，很高兴认识你。这是一段语音试听。"
+                : "你好，我现在是" + (config.defaultVoice || "默认") + "音色。很高兴认识你。";
             const blob = await synthesizeSpeech(
-                "你好，我现在是" + (config.defaultVoice || "默认") + "音色。很高兴认识你。",
+                previewText,
                 config,
             );
             if (!blob) throw new Error("当前语音配置未返回真实音频");
@@ -618,6 +723,39 @@ export function VoiceSettings() {
 
                                         {config.provider === "Minimax" && (
                                             <>
+                                                <div className="flex flex-col gap-1">
+                                                    <div className="flex items-center justify-between px-1">
+                                                        <label className="menu-desc">语速</label>
+                                                        <span className="menu-label font-medium">{(config.speechSpeed ?? DEFAULT_SPEECH_SPEED).toFixed(1)}×</span>
+                                                    </div>
+                                                    <input
+                                                        type="range"
+                                                        min={MINIMAX_SPEED_MIN}
+                                                        max={MINIMAX_SPEED_MAX}
+                                                        step={MINIMAX_SPEED_STEP}
+                                                        value={config.speechSpeed ?? DEFAULT_SPEECH_SPEED}
+                                                        onChange={(e) => updateConfig(config.id, { speechSpeed: Number(e.target.value) })}
+                                                        className="w-full accent-black"
+                                                        aria-label="Minimax 语速"
+                                                    />
+                                                    <div className="relative mt-1 h-5 px-1 text-xs text-gray-500" aria-hidden="true">
+                                                        <span className="absolute left-1 whitespace-nowrap">{MINIMAX_SPEED_MIN.toFixed(1)}×</span>
+                                                        <span className="absolute whitespace-nowrap" style={{ left: "33.333%", transform: "translateX(-50%)" }}>1.0× 默认</span>
+                                                        <span className="absolute right-1 whitespace-nowrap">{MINIMAX_SPEED_MAX.toFixed(1)}×</span>
+                                                    </div>
+                                                </div>
+                                                <div className="flex flex-col gap-1">
+                                                    <label className="menu-desc ml-1">朗读语言</label>
+                                                    <select
+                                                        value={config.languageBoost || ""}
+                                                        onChange={(e) => updateConfig(config.id, { languageBoost: e.target.value || undefined })}
+                                                        className="ui-select"
+                                                    >
+                                                        {MINIMAX_LANGUAGE_OPTIONS.map(option => (
+                                                            <option key={option.value || "default"} value={option.value}>{option.label}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
                                                 <div className="flex flex-col gap-1">
                                                     <label className="menu-desc ml-1">语音模型 (TTS Model)</label>
                                                     <div className="flex flex-col gap-2">

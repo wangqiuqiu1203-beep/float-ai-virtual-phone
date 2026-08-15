@@ -3,24 +3,29 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, ChevronLeft, Code, Image as ImageIcon, MessageSquare, MoreHorizontal, RotateCcw, Trash2, UserRound } from "lucide-react";
+import { AlertCircle, ChevronLeft, Code, Image as ImageIcon, MessageSquare, MoreHorizontal, RotateCcw, Sparkles, Trash2, UserRound } from "lucide-react";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog } from "@/components/ui/modal";
+import { MediaPreviewOverlay } from "@/components/chat/media-preview-overlay";
 import { Input } from "@/components/ui/form";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
-import { scopeSessionCSS } from "@/lib/css-scoper";
+import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { CHAT_SESSION_CSS_EXAMPLE } from "@/lib/css-examples";
 import {
     clearMascotToolHistoryMessages,
+    createMascotSession,
     deleteMascotMessageWithLinkedTools,
+    deleteMascotSession,
+    generateMascotReply,
+    sendMascotMessage,
     getMascotChatSnapshot,
     hasMascotToolHistoryMessages,
     hydrateMascotChat,
-    resetMascotConversation,
-    sendMascotMessage,
+    renameMascotSession,
     setMascotMessages,
     stopMascotGeneration,
     subscribeMascotChat,
+    switchMascotSession,
 } from "@/lib/mascot-chat-store";
 import type { MascotMsg } from "@/lib/mascot-engine";
 import { getMascotContext, subscribeMascotContext } from "@/lib/mascot-context";
@@ -138,7 +143,6 @@ function MascotInfoPanel({
     const [personaDraft, setPersonaDraft] = useState(settings.personaPrompt);
     const [editingCSS, setEditingCSS] = useState(false);
     const [cssDraft, setCssDraft] = useState(settings.chatCustomCSS || "");
-    const [showConfirmNewSession, setShowConfirmNewSession] = useState(false);
     const [showConfirmClearTools, setShowConfirmClearTools] = useState(false);
     const [showConfirmDelete, setShowConfirmDelete] = useState(false);
     const chat = useSyncExternalStore(subscribeMascotChat, getMascotChatSnapshot, getMascotChatSnapshot);
@@ -279,13 +283,62 @@ function MascotInfoPanel({
                             </span>
                         </div>
                     </button>
-                    <button className="menu-item" onClick={() => setShowConfirmNewSession(true)}>
-                        <MascotInfoIcon color="var(--c-danger)"><RotateCcw size={22} strokeWidth={1.75} /></MascotInfoIcon>
+                    <button
+                        className="menu-item"
+                        disabled={!chat.hydrated || chat.isThinking}
+                        onClick={() => {
+                            const id = createMascotSession();
+                            if (id) onClose();
+                        }}
+                        style={!chat.hydrated || chat.isThinking ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+                    >
+                        <MascotInfoIcon color="var(--c-icon-active)"><RotateCcw size={22} strokeWidth={1.75} /></MascotInfoIcon>
                         <div className="menu-label-group">
-                            <span className="menu-label menu-label-danger">新会话</span>
-                            <span className="menu-desc">清空当前 AI助手聊天记录并重新开始</span>
+                            <span className="menu-label">开启新对话</span>
+                            <span className="menu-desc">保留当前记录，创建一段独立对话</span>
                         </div>
                     </button>
+                    {chat.sessions.map((session) => {
+                        const active = session.id === chat.activeSessionId;
+                        return (
+                            <div className="menu-item" key={session.id} style={{ gap: 8 }}>
+                                <MascotInfoIcon color={active ? "var(--c-icon-active)" : "var(--c-text-secondary)"}>
+                                    <MessageSquare size={21} strokeWidth={1.75} />
+                                </MascotInfoIcon>
+                                <button
+                                    type="button"
+                                    className="menu-label-group min-w-0 flex-1 text-left"
+                                    disabled={chat.isThinking || active}
+                                    onClick={() => {
+                                        if (switchMascotSession(session.id)) onClose();
+                                    }}
+                                    style={{ opacity: chat.isThinking ? 0.55 : 1 }}
+                                >
+                                    <span className="menu-label truncate">{session.title}{active ? "（当前）" : ""}</span>
+                                    <span className="menu-desc">{new Date(session.updatedAt).toLocaleString()}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    className="menu-desc shrink-0"
+                                    disabled={chat.isThinking}
+                                    onClick={() => {
+                                        const title = window.prompt("重命名对话", session.title);
+                                        if (title !== null) renameMascotSession(session.id, title);
+                                    }}
+                                >改名</button>
+                                <button
+                                    type="button"
+                                    className="menu-desc shrink-0 text-[var(--c-danger)]"
+                                    disabled={chat.isThinking}
+                                    onClick={() => {
+                                        if (window.confirm(`确定删除对话“${session.title}”吗？此操作不会删除角色卡，但无法恢复这段聊天记录。`)) {
+                                            deleteMascotSession(session.id);
+                                        }
+                                    }}
+                                >删除</button>
+                            </div>
+                        );
+                    })}
                     <button className="menu-item" onClick={() => setShowConfirmDelete(true)}>
                         <MascotInfoIcon color="var(--c-danger)"><Trash2 size={22} strokeWidth={1.75} /></MascotInfoIcon>
                         <div className="menu-label-group">
@@ -368,22 +421,6 @@ function MascotInfoPanel({
                 </div>
             )}
 
-            {showConfirmNewSession && (
-                <ConfirmDialog
-                    title="开始新会话？"
-                    message="当前 AI助手聊天记录会被清空，之后从新会话继续。"
-                    icon={AlertCircle}
-                    variant="danger"
-                    confirmLabel="新会话"
-                    cancelLabel="取消"
-                    onConfirm={() => {
-                        resetMascotConversation();
-                        setShowConfirmNewSession(false);
-                    }}
-                    onCancel={() => setShowConfirmNewSession(false)}
-                />
-            )}
-
             {showConfirmClearTools && (
                 <ConfirmDialog
                     title="清理工具调用历史？"
@@ -432,6 +469,7 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
     const [visibleMascotMessageCount, setVisibleMascotMessageCount] = useState(MASCOT_INITIAL_VISIBLE_MESSAGE_COUNT);
     const [activeMascotMessageIndex, setActiveMascotMessageIndex] = useState<number | null>(null);
     const [contextMenuAnchor, setContextMenuAnchor] = useState<ContextMenuAnchor | null>(null);
+    const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(() => loadChatAppSettings().enterToSendEnabled === true);
     const wrapperRef = useRef<HTMLDivElement | null>(null);
     const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -453,6 +491,8 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
         allVisibleMessageEntries.slice(-visibleMascotMessageCount)
     ), [allVisibleMessageEntries, visibleMascotMessageCount]);
     const hasMoreMascotMessages = allVisibleMessageEntries.length > visibleMessageEntries.length;
+    const latestVisibleChatMessage = [...chat.messages].reverse().find((msg) => !msg.hidden && msg.role !== "tool");
+    const canGenerateReply = !chat.isThinking && latestVisibleChatMessage?.role === "user";
     const scrollSignature = useMemo(() => {
         const last = visibleMessageEntries[visibleMessageEntries.length - 1]?.msg;
         const lastText = last ? getMascotMessageText(last) : "";
@@ -655,6 +695,12 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
         await sendMascotMessage({ text, images, context });
     };
 
+    const handleGenerateReply = async () => {
+        if (!canGenerateReply) return;
+        setShowEmojiPanel(false);
+        await generateMascotReply({ context });
+    };
+
     const closeMascotContextMenu = useCallback(() => {
         setActiveMascotMessageIndex(null);
         setContextMenuAnchor(null);
@@ -823,7 +869,16 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                 {msg.images.map((ref, idx) => {
                     const url = imagePreviewCache[ref] || (ref.startsWith("data:") ? ref : "");
                     if (!url) return <span key={idx} className="mascot-inline-image-loading" />;
-                    return <img key={idx} src={url} alt="" onLoad={handleMascotImageLoad} />;
+                    return (
+                        <img
+                            key={idx}
+                            src={url}
+                            alt=""
+                            style={{ cursor: "pointer" }}
+                            onLoad={handleMascotImageLoad}
+                            onClick={e => { e.stopPropagation(); setPreviewImageUrl(url); }}
+                        />
+                    );
                 })}
             </div>
         );
@@ -839,7 +894,7 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
             {...(!initialScrollReady ? { "data-initial-scroll-pending": "" } : {})}
         >
             {settings.chatCustomCSS && (
-                <style dangerouslySetInnerHTML={{ __html: scopeSessionCSS(settings.chatCustomCSS, ".mascot-chat-session") }} />
+                <SessionCustomCSS css={settings.chatCustomCSS} scope=".mascot-chat-session" />
             )}
             <style>{`
                 .mascot-chat-session > .page-body {
@@ -1139,6 +1194,16 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
                         )}
                     </button>
+                    <button
+                        type="button"
+                        onClick={() => void handleGenerateReply()}
+                        disabled={!canGenerateReply}
+                        className="ui-bare-btn text-[var(--c-text)]"
+                        aria-label="重新生成回复"
+                        title="生成回复（发送后未生成或删除回复后使用）"
+                    >
+                        <Sparkles size={24} strokeWidth={1.5} />
+                    </button>
                 </div>
                 {showEmojiPanel && <EmojiPanel onSelect={appendEmoji} />}
             </div>
@@ -1155,6 +1220,14 @@ export function MascotChatRoom({ onBack, onDeleted }: MascotChatRoomProps) {
                     />
                 </div>,
                 wrapperRef.current.parentElement
+            )}
+
+            {previewImageUrl && (
+                <MediaPreviewOverlay
+                    imageUrl={previewImageUrl}
+                    saveFilename="小卷图片.png"
+                    onClose={() => setPreviewImageUrl(null)}
+                />
             )}
         </div>
     );

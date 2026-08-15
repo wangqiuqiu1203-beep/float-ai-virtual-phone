@@ -1,17 +1,26 @@
 // lib/chat-engine.ts
 
+import { createSseJsonParser } from "./sse-json";
 import { loadCharacters } from "./character-storage";
+import { buildScreenEffectPromptHint } from "./chat-screen-effects";
+import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
+import { buildChatPluginPromptFragments } from "./chat-plugin-storage";
+import type { LlmRequestPayload } from "./chat-plugin-types";
 import type { Character } from "./character-types";
 import {
     ChatSession,
     ChatMessage,
     loadFollowUpSchedule,
     loadChatAppSettings,
+    getMaxToolRounds,
     loadChatSessions,
     saveChatSessions,
     getLatestCharacterStateValues,
     normalizeVisionImagePromptLimit,
+    createResponseBatchId,
+    createToolExecutionId,
 } from "./chat-storage";
+import { extractTextToolDirectiveText, stripTextToolDirectives } from "./text-tool-protocol";
 import type { ApiConfig, PresetConfig, Prompt, PromptOrderEntry, RegexConfig } from "./settings-types";
 import type { CustomAppPromptProfile } from "./custom-app-types";
 import {
@@ -527,6 +536,41 @@ type PreparedApiMessage = {
     marker?: string;
 };
 
+/**
+ * 聊天插件 llm.request 织入：让插件在请求发出前改写 messages / 采样参数。
+ * 四个 sendLLM*Request 入口统一走这里；无插件时零开销直通。
+ */
+async function applyChatPluginLlmRequest<T extends { role: string }>(
+    preset: PresetConfig | null,
+    messages: T[],
+    purpose: string,
+    sessionId?: string,
+): Promise<{ messages: T[]; preset: PresetConfig | null }> {
+    if (typeof window === "undefined") return { messages, preset };
+    const payload = await runChatPluginTransform("llm.request", {
+        messages: messages as unknown as LlmRequestPayload["messages"],
+        purpose,
+        sessionId,
+    });
+    let nextPreset = preset;
+    if (preset && (payload.temperature !== undefined || payload.maxTokens !== undefined)) {
+        nextPreset = { ...preset };
+        if (payload.temperature !== undefined) nextPreset.temperature = payload.temperature;
+        if (payload.maxTokens !== undefined) nextPreset.openai_max_tokens = payload.maxTokens;
+    }
+    const nextMessages = Array.isArray(payload.messages)
+        ? payload.messages as unknown as T[]
+        : messages;
+    return { messages: nextMessages, preset: nextPreset };
+}
+
+/** 聊天插件 llm.response 织入：模型原始回复在内置正则处理前交给插件改写 */
+async function applyChatPluginLlmResponse(text: string, purpose: string, sessionId?: string): Promise<string> {
+    if (typeof window === "undefined") return text;
+    const payload = await runChatPluginTransform("llm.response", { text, sessionId, purpose });
+    return typeof payload.text === "string" ? payload.text : text;
+}
+
 export function prepareMessagesForApi(
     provider: string,
     messages: LLMMessage[],
@@ -664,31 +708,26 @@ async function readSseStream(
     let rawResponse = "";
     const contentStripper = createStreamingTimestampStripper();
 
-    const handleEvent = async (eventText: string) => {
-        const dataLines = eventText
-            .split("\n")
-            .map((line) => line.trim())
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trim());
-        for (const dataLine of dataLines) {
-            if (!dataLine || dataLine === "[DONE]") continue;
-            rawResponse += `${dataLine}\n`;
-            try {
-                const parsed = JSON.parse(dataLine) as unknown;
-                const parts = parseProviderStreamDelta(providerKind, parsed);
-                if (parts.reasoning) {
-                    await callbacks?.onReasoningDelta?.(parts.reasoning);
-                }
-                if (parts.content) {
-                    const cleanDelta = contentStripper.push(parts.content);
-                    if (cleanDelta) {
-                        content += cleanDelta;
-                        await callbacks?.onDelta?.(cleanDelta);
-                    }
-                }
-            } catch {
-                // Some relays send keepalive or non-JSON event data. Ignore it.
+    // 容错解析：中转把长 JSON 行切开时做碎片重组，不再静默丢增量（见 sse-json.ts）
+    const sseParser = createSseJsonParser();
+    const handleParsed = async (parsed: unknown) => {
+        const parts = parseProviderStreamDelta(providerKind, parsed);
+        if (parts.reasoning) {
+            await callbacks?.onReasoningDelta?.(parts.reasoning);
+        }
+        if (parts.content) {
+            const cleanDelta = contentStripper.push(parts.content);
+            if (cleanDelta) {
+                content += cleanDelta;
+                await callbacks?.onDelta?.(cleanDelta);
             }
+        }
+    };
+    const handleEvent = async (eventText: string) => {
+        // 原始流只为调试快照保留头部：长输出整条累积会把低内存设备的 WebView 顶爆
+        if (rawResponse.length < 65_536) rawResponse += `${eventText}\n`;
+        for (const parsed of sseParser.pushEvent(eventText)) {
+            await handleParsed(parsed);
         }
     };
 
@@ -705,6 +744,9 @@ async function readSseStream(
     buffer += decoder.decode();
     if (buffer.trim()) {
         await handleEvent(buffer);
+    }
+    for (const parsed of sseParser.flush()) {
+        await handleParsed(parsed);
     }
     const finalContent = contentStripper.flush();
     if (finalContent) {
@@ -730,8 +772,19 @@ export async function sendLLMStreamRequest(
     },
     callbacks?: ChatCompletionStreamCallbacks,
 ): Promise<ChatCompletionStreamResult> {
-    const requestMessages = toLlmRequestMessages(messages);
-    const request = buildProviderRequest(config, preset, requestMessages, { stream: true });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose);
+    const effectivePreset = afterPlugins.preset;
+    const originalOnDelta = callbacks?.onDelta;
+    const pluginCallbacks: ChatCompletionStreamCallbacks | undefined = callbacks ? {
+        ...callbacks,
+        onDelta: (text: string) => {
+            emitChatPluginEvent("llm.streamChunk", { chunk: text, purpose: pluginPurpose });
+            return originalOnDelta?.(text);
+        },
+    } : undefined;
+    const requestMessages = toLlmRequestMessages(afterPlugins.messages);
+    const request = buildProviderRequest(config, effectivePreset, requestMessages, { stream: true });
     const requestBodyJson = JSON.stringify(request.body);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -748,11 +801,12 @@ export async function sendLLMStreamRequest(
             const errorText = await response.text();
             throw new ChatEngineError(`API Stream Error ${response.status}: ${errorText}`);
         }
-        const { content: streamedContent, rawResponse } = await readSseStream(response, request.providerKind, callbacks);
+        const { content: streamedContent, rawResponse } = await readSseStream(response, request.providerKind, pluginCallbacks ?? callbacks);
         if (!streamedContent.trim()) {
             throw new ChatEngineError("流式响应没有解析到文本增量。");
         }
         let rawOutput = stripHallucinatedTimestamps(streamedContent.trim());
+        rawOutput = await applyChatPluginLlmResponse(rawOutput, pluginPurpose);
 
         // Store API log entry — mirror sendLLMRequest so streaming calls also show up
         // in the "底层调用大模型日志" panel.
@@ -809,6 +863,8 @@ export async function sendLLMRequest(
     options?: {
         skipOutputRegex?: boolean;
         includeReasoning?: boolean;
+        /** 供调用方捕获模型思维链（reasoning）内容，不影响返回文本 */
+        onReasoning?: (text: string) => void;
         appId?: string;
         appTags?: string[];
         followUpCount?: number;
@@ -816,9 +872,12 @@ export async function sendLLMRequest(
         signal?: AbortSignal;
     },
 ): Promise<string> {
-    const requestMessages = toLlmRequestMessages(messages);
-    const request = buildProviderRequest(config, preset, requestMessages);
-    publishDebugPromptSnapshot({ request, config, preset, meta, options, requestKind: "completion" });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
+    const effectivePreset = afterPlugins.preset;
+    const requestMessages = toLlmRequestMessages(afterPlugins.messages);
+    const request = buildProviderRequest(config, effectivePreset, requestMessages);
+    publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "completion" });
     const requestBodyJson = JSON.stringify(request.body);
     const requestBodySize = requestBodyJson.length;
     const requestTokenEstimate = Math.ceil(requestBodySize / 3);
@@ -865,6 +924,10 @@ export async function sendLLMRequest(
         const parsed = parseProviderResponse(request.providerKind, data);
         let rawOutput = parsed.content || "";
 
+        if (parsed.reasoning) {
+            try { options?.onReasoning?.(parsed.reasoning); } catch { /* 捕获回调异常，不影响主流程 */ }
+        }
+
         // Prepend reasoning content as <think> block (only when caller requests it, e.g. story mode)
         if (options?.includeReasoning) {
             const reasoning = parsed.reasoning || "";
@@ -872,6 +935,8 @@ export async function sendLLMRequest(
                 rawOutput = `<think>\n${reasoning}\n</think>\n\n${rawOutput}`;
             }
         }
+
+        rawOutput = await applyChatPluginLlmResponse(rawOutput, pluginPurpose, options?.debugSessionId);
 
         if (!rawOutput && parsed.toolCalls.length === 0) {
             const emptyDetails = emptyResponseDetails(parsed.raw);
@@ -935,6 +1000,8 @@ export type LLMToolRequestResult = {
     reasoning?: string;
     openRouterReasoningDetails?: unknown[];
     toolCalls: LlmToolCall[];
+    /** 参数 JSON 被截断（输出上限/连接中断）而丢弃的调用名——调用方据此提示重试/分段 */
+    truncatedToolCalls?: string[];
     rawResponse: string;
     providerKind: LlmProviderKind;
     usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
@@ -959,23 +1026,35 @@ function mergeToolCallDelta(drafts: Map<number, StreamToolCallDraft>, delta: Llm
     });
 }
 
-function finalizeStreamToolCalls(drafts: Map<number, StreamToolCallDraft>): LlmToolCall[] {
-    return [...drafts.entries()]
-        .sort(([a], [b]) => a - b)
-        .map(([index, draft]) => {
-            const args = draft.args ?? JSON.parse(draft.argsText || "{}") as unknown;
-            if (!args || typeof args !== "object" || Array.isArray(args)) {
-                throw new ChatEngineError(`原生动作 ${draft.name || index} 的参数不是 JSON object。`);
+function finalizeStreamToolCalls(drafts: Map<number, StreamToolCallDraft>): { calls: LlmToolCall[]; truncatedNames: string[] } {
+    const calls: LlmToolCall[] = [];
+    const truncatedNames: string[] = [];
+    for (const [index, draft] of [...drafts.entries()].sort(([a], [b]) => a - b)) {
+        if (!draft.name) continue;
+        let args: unknown = draft.args;
+        if (args == null) {
+            try {
+                args = JSON.parse(draft.argsText || "{}") as unknown;
+            } catch {
+                // 参数 JSON 残缺：模型被输出上限/连接中断掐断在调用中途。
+                // 不再抛错杀掉整轮（症状：Unterminated string）——丢弃该调用并记录，交调用方提示重试/分段
+                truncatedNames.push(draft.name);
+                continue;
             }
-            const call: LlmToolCall = {
-                id: draft.id || `tool_${Date.now()}_${index}`,
-                name: draft.name || "",
-                args: args as Record<string, unknown>,
-            };
-            if (draft.thoughtSignature) call.thoughtSignature = draft.thoughtSignature;
-            return call;
-        })
-        .filter(call => call.name);
+        }
+        if (!args || typeof args !== "object" || Array.isArray(args)) {
+            truncatedNames.push(draft.name);
+            continue;
+        }
+        const call: LlmToolCall = {
+            id: draft.id || `tool_${Date.now()}_${index}`,
+            name: draft.name,
+            args: args as Record<string, unknown>,
+        };
+        if (draft.thoughtSignature) call.thoughtSignature = draft.thoughtSignature;
+        calls.push(call);
+    }
+    return { calls, truncatedNames };
 }
 
 export async function sendLLMToolStreamRequest(
@@ -991,12 +1070,17 @@ export async function sendLLMToolStreamRequest(
         followUpCount?: number;
         debugSessionId?: string;
         signal?: AbortSignal;
+        /** 单次最大输出 token：按调用覆盖预设值（工坊输出护栏用） */
+        maxTokens?: number;
     },
     callbacks?: ChatCompletionStreamCallbacks,
 ): Promise<LLMToolRequestResult> {
     void regexes;
-    const request = buildProviderRequest(config, preset, messages, { tools, stream: true });
-    publishDebugPromptSnapshot({ request, config, preset, meta, options, requestKind: "native-tools-stream", tools });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
+    const effectivePreset = afterPlugins.preset;
+    const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools, stream: true, maxTokens: options?.maxTokens });
+    publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools-stream", tools });
     const requestBodyJson = JSON.stringify(request.body);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -1025,20 +1109,11 @@ export async function sendLLMToolStreamRequest(
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const parsed = parseSseEvents(buffer);
-            buffer = parsed.rest;
-            for (const event of parsed.events) {
-                const dataLines = event.split("\n")
-                    .filter((line) => line.startsWith("data:"))
-                    .map((line) => line.slice(5).trim());
-                for (const dataLine of dataLines) {
-                    if (!dataLine || dataLine === "[DONE]") continue;
-                    rawResponse += `${dataLine}\n`;
-                    const data = JSON.parse(dataLine) as unknown;
+        // 容错解析：中转把超长工具参数 JSON 行切开时做碎片重组，
+        // 不再因单行 JSON Parse error 杀掉整条流（写 APP 大参数时高发）
+        const sseParser = createSseJsonParser();
+        const handleParsedDelta = async (data: unknown) => {
+            {
                     const delta = parseProviderStreamDelta(request.providerKind, data);
                     if (delta.reasoning) {
                         reasoning += delta.reasoning;
@@ -1048,6 +1123,7 @@ export async function sendLLMToolStreamRequest(
                         const cleanDelta = contentStripper.push(delta.content);
                         if (cleanDelta) {
                             content += cleanDelta;
+                            emitChatPluginEvent("llm.streamChunk", { chunk: cleanDelta, sessionId: options?.debugSessionId, purpose: pluginPurpose });
                             await callbacks?.onDelta?.(cleanDelta);
                         }
                     }
@@ -1069,22 +1145,43 @@ export async function sendLLMToolStreamRequest(
                             }
                         }
                     }
+            }
+        };
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const parsed = parseSseEvents(buffer);
+            buffer = parsed.rest;
+            for (const event of parsed.events) {
+                if (rawResponse.length < 65_536) rawResponse += `${event}\n`;
+                for (const data of sseParser.pushEvent(event)) {
+                    await handleParsedDelta(data);
                 }
             }
         }
 
-        if (buffer.trim()) rawResponse += buffer.trim();
+        if (buffer.trim()) {
+            if (rawResponse.length < 65_536) rawResponse += buffer.trim();
+            for (const data of sseParser.pushEvent(buffer)) {
+                await handleParsedDelta(data);
+            }
+        }
+        for (const data of sseParser.flush()) {
+            await handleParsedDelta(data);
+        }
         const finalContent = contentStripper.flush();
         if (finalContent) {
             content += finalContent;
             await callbacks?.onDelta?.(finalContent);
         }
+        content = await applyChatPluginLlmResponse(content, pluginPurpose, options?.debugSessionId);
 
         const sanitizedMessages = request.messagesForLog.map(m => ({
             ...m,
             content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
         }));
-        const toolCalls = finalizeStreamToolCalls(toolDrafts);
+        const { calls: toolCalls, truncatedNames } = finalizeStreamToolCalls(toolDrafts);
         const logEntry: DebugInfo = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             characterName: meta?.characterName,
@@ -1098,7 +1195,7 @@ export async function sendLLMToolStreamRequest(
         while (logs.length > MAX_API_LOGS) logs.shift();
         _saveLogs(logs);
 
-        if (!content && toolCalls.length === 0) {
+        if (!content && toolCalls.length === 0 && truncatedNames.length === 0) {
             throw new ChatEngineError("原生动作流式响应没有解析到文本或动作。");
         }
 
@@ -1107,6 +1204,7 @@ export async function sendLLMToolStreamRequest(
             reasoning,
             openRouterReasoningDetails: undefined,
             toolCalls,
+            truncatedToolCalls: truncatedNames.length ? truncatedNames : undefined,
             rawResponse: logEntry.rawResponse,
             providerKind: request.providerKind,
         };
@@ -1141,8 +1239,11 @@ export async function sendLLMToolRequest(
         signal?: AbortSignal;
     },
 ): Promise<LLMToolRequestResult> {
-    const request = buildProviderRequest(config, preset, messages, { tools });
-    publishDebugPromptSnapshot({ request, config, preset, meta, options, requestKind: "native-tools", tools });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
+    const effectivePreset = afterPlugins.preset;
+    const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools });
+    publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools", tools });
     const requestBodyJson = JSON.stringify(request.body);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -1167,6 +1268,7 @@ export async function sendLLMToolRequest(
         if (options?.includeReasoning && parsed.reasoning) {
             rawOutput = `<think>\n${parsed.reasoning}\n</think>\n\n${rawOutput}`;
         }
+        rawOutput = await applyChatPluginLlmResponse(rawOutput, pluginPurpose, options?.debugSessionId);
 
         if (!rawOutput && parsed.toolCalls.length === 0) {
             const emptyDetails = emptyResponseDetails(parsed.raw);
@@ -1348,20 +1450,11 @@ export type ChatCompletionResult = {
 };
 
 /** Extract combined clean text from a ChatCompletionResult (for callers that need a plain string) */
-/** Strip tool tags from text for display/processing */
-function stripToolTags(text: string): string {
-    return text
-        .replace(/\[[^\]]*?(?:获取指令|获取工具)[:：][^\]]*\]/g, "")
-        .replace(/\[[^\]]*?(?:执行动作|工具调用)[:：][^\]]*?[（(][\s\S]*?[)）]\]/g, "")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-}
-
 export function flattenCompletionResult(result: ChatCompletionResult): string {
-    return result.parts.map(p => stripToolTags(p.text)).filter(Boolean).join("\n\n");
+    return result.parts.map(p => stripTextToolDirectives(p.text)).filter(Boolean).join("\n\n");
 }
 
-const MAX_TOOL_ROUNDS = 5;
+// 单条消息工具循环轮数上限：设置项（聊天工具箱），默认 5
 const MAX_NATIVE_EXPANDED_TOOL_PACKAGES = 2;
 
 export function buildChatBilingualInstruction(
@@ -1789,7 +1882,14 @@ export async function buildChatPromptMessages(
     const scheduleSummary = buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now));
     const currentSchedule = getCurrentCalendarScheduleForPrompt("character", character.id, now);
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
-    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt();
+    const pluginPrompt = await runChatPluginTransform("prompt.system", {
+        sessionId: session.id,
+        isGroup: !!session.isGroup,
+        characterId: character.id,
+        hint: buildChatPluginPromptFragments(session.id),
+    });
+    const pluginPromptHint = pluginPrompt.hint?.trim() ? `\n\n### 扩展插件\n${pluginPrompt.hint.trim()}\n` : "";
+    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt() + buildScreenEffectPromptHint() + pluginPromptHint;
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
 const chatBilingualInstruction = session.isGroup
     ? session.universalTranslationMode
@@ -1880,12 +1980,20 @@ export type ChatCompletionCallbacks = {
         responseRoundId?: string;
         editableResponseText?: string;
     }, options?: {
-        promptHidden?: boolean;
+        responseBatchId?: string;
+        rawResponseText?: string;
     }) => void | Promise<void>;
     onToolNotice?: (notice: string) => void;
-    onToolResult?: (content: string) => void;
-    onToolAssistantTurn?: (content: string) => void;
-    onToolExecution?: (results: ToolResult[], historyContent?: string) => void;
+    onToolResult?: (content: string, options?: { toolExecutionId?: string }) => void;
+    onToolAssistantTurn?: (content: string, options?: {
+        responseBatchId?: string;
+        responseRoundId?: string;
+        senderCharacterId?: string;
+        senderName?: string;
+    }) => void;
+    /** 每轮 LLM 调用解析出思维链（reasoning）时触发，先于该轮 onTextPart */
+    onReasoning?: (text: string) => void;
+    onToolExecution?: (results: ToolResult[], historyContent?: string, options?: { toolExecutionId?: string }) => void;
     onNativeToolAssistantTurn?: (turn: {
         content: string;
         rawContent: string;
@@ -1897,12 +2005,15 @@ export type ChatCompletionCallbacks = {
         toolCallId: string;
         name: string;
         content: string;
+        toolExecutionId?: string;
     }) => void;
 };
 
 export type OfflineChatCompletionResult = ParsedOfflineResponse & {
     model: string;
     presetName: string;
+    /** 模型思维链（reasoning）内容，供线下记录展示 */
+    reasoning?: string;
 };
 
 export async function generateOfflineChatCompletion(
@@ -1919,6 +2030,7 @@ export async function generateOfflineChatCompletion(
         },
     );
     const summaryTag = preset?.story_summary_tag?.trim() || "summary";
+    let reasoning = "";
     const rawOutput = await sendLLMRequest(config, preset, llmMessages, regexes, {
         characterName: character.name,
         userName: userIdentity?.name,
@@ -1926,11 +2038,13 @@ export async function generateOfflineChatCompletion(
         appTags: ["chat", "offline"],
         debugSessionId: session.id,
         signal: options?.signal,
+        onReasoning: (t) => { reasoning = t; },
     });
     return {
         ...parseOfflineResponse(rawOutput, summaryTag),
         model: config.defaultModel,
         presetName: preset?.name || "默认预设",
+        reasoning: reasoning || undefined,
     };
 }
 
@@ -1966,7 +2080,8 @@ async function generateNativeChatCompletion(
     const actionContext = { characterId: session.contactId, sessionId: session.id, sourceEngine: "chat" as const, signal: options?.signal };
     const expandableSourceKeys = new Set(enabledTools.filter(tool => !isNativeSingleTool(tool)).map(nativeToolSourceKey));
 
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    const maxToolRounds = getMaxToolRounds();
+    for (let round = 0; round < maxToolRounds; round += 1) {
         let result: LLMToolRequestResult;
         try {
             result = await sendLLMToolRequest(
@@ -2005,6 +2120,8 @@ async function generateNativeChatCompletion(
 
         if (result.toolCalls.length === 0) {
             throwIfAborted(options?.signal);
+            // 无工具调用的最终轮：把解析到的思维链先交给回调（先于 onTextPart，与非原生路径一致）
+            if (result.reasoning) callbacks?.onReasoning?.(result.reasoning);
             await callbacks?.onTextPart?.(afterActionStrip);
             parts.push({ text: afterActionStrip });
             break;
@@ -2123,6 +2240,7 @@ async function generateNativeChatCompletion(
             openRouterReasoningDetails: result.openRouterReasoningDetails,
             toolCalls: result.toolCalls,
         });
+        const toolExecutionId = createToolExecutionId();
         for (const outcome of outcomes) {
             throwIfAborted(options?.signal);
             const nativeCall = outcome.nativeCall;
@@ -2130,6 +2248,7 @@ async function generateNativeChatCompletion(
                 toolCallId: nativeCall.id,
                 name: nativeCall.name,
                 content: outcome.formattedContent,
+                toolExecutionId,
             });
             requestMessages.push({
                 role: "tool",
@@ -2142,7 +2261,9 @@ async function generateNativeChatCompletion(
         const resultsForHistory = realResults.filter(r => r.persistToHistory !== false);
         const toolResultContent = resultsForHistory.length > 0 ? formatToolResults(resultsForHistory) : "";
         throwIfAborted(options?.signal);
-        if (realResults.length > 0) callbacks?.onToolExecution?.(realResults, toolResultContent || undefined);
+        if (realResults.length > 0) {
+            callbacks?.onToolExecution?.(realResults, toolResultContent || undefined, { toolExecutionId });
+        }
 
         for (const r of realResults) {
             for (const att of r.mediaAttachments || []) {
@@ -2203,7 +2324,8 @@ export async function generateChatCompletion(
     const meta = { characterName: character.name, userName: userIdentity?.name };
     const actionContext = { characterId: session.contactId, sessionId: session.id, sourceEngine: "chat" as const, signal: options?.signal };
 
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const maxToolRounds = getMaxToolRounds();
+    for (let round = 0; round < maxToolRounds; round++) {
         let filteredOutput: string;
         try {
             filteredOutput = await sendLLMRequest(config, preset, llmMessages, regexes, meta, {
@@ -2212,6 +2334,7 @@ export async function generateChatCompletion(
                 followUpCount: options?.followUpCount,
                 debugSessionId: session.id,
                 signal: options?.signal,
+                onReasoning: callbacks?.onReasoning,
             });
         } catch (err) {
             const errMsg = `⚠️ 回复生成失败: ${err instanceof Error ? err.message : String(err)}`;
@@ -2245,10 +2368,18 @@ export async function generateChatCompletion(
             break;
         }
 
-        // Save raw text as assistant message (with tool tags preserved)
+        // Store ordinary prose as normal assistant messages. The directive itself is a
+        // separate hidden tool_call record in the same response batch.
         throwIfAborted(options?.signal);
-        callbacks?.onToolAssistantTurn?.(filteredOutput);
-        await callbacks?.onTextPart?.(afterActionStrip, undefined, { promptHidden: true });
+        const responseBatchId = createResponseBatchId();
+        const toolDirectiveText = extractTextToolDirectiveText(afterActionStrip);
+        await callbacks?.onTextPart?.(afterActionStrip, undefined, {
+            responseBatchId,
+            rawResponseText: afterActionStrip,
+        });
+        if (toolDirectiveText) {
+            callbacks?.onToolAssistantTurn?.(toolDirectiveText, { responseBatchId });
+        }
         parts.push({ text: filteredOutput });
 
         // Helper: find insert index for injecting after history
@@ -2320,11 +2451,12 @@ export async function generateChatCompletion(
             const resultsForContinuation = results.filter(r => r.continueConversation !== false);
             const toolResultContent = resultsForHistory.length > 0 ? formatToolResults(resultsForHistory) : "";
             throwIfAborted(options?.signal);
-            callbacks?.onToolExecution?.(results, toolResultContent || undefined);
+            const toolExecutionId = createToolExecutionId();
+            callbacks?.onToolExecution?.(results, toolResultContent || undefined, { toolExecutionId });
 
             if (toolResultContent && resultsForContinuation.length > 0) {
                 throwIfAborted(options?.signal);
-                callbacks?.onToolResult?.(toolResultContent);
+                callbacks?.onToolResult?.(toolResultContent, { toolExecutionId });
                 const idx = findInsertIdx();
                 const insertions: LLMMessage[] = [
                     { role: "assistant", content: assistantForToolContext, _debugMeta: { _fromHistory: true } },
@@ -2359,7 +2491,7 @@ export async function generateChatCompletion(
             }
 
             // Last round — one final call
-            if (round === MAX_TOOL_ROUNDS - 1) {
+            if (round === maxToolRounds - 1) {
                 try {
                     const finalOutput = await sendLLMRequest(config, preset, llmMessages, regexes, meta, {
                         appId: options?.appId ?? "chat",
@@ -2367,6 +2499,7 @@ export async function generateChatCompletion(
                         followUpCount: options?.followUpCount,
                         debugSessionId: session.id,
                         signal: options?.signal,
+                        onReasoning: callbacks?.onReasoning,
                     });
                     throwIfAborted(options?.signal);
                     await callbacks?.onTextPart?.(finalOutput);

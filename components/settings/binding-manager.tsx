@@ -9,11 +9,13 @@ import {
     Check,
     ChevronRight,
     Code2,
+    Languages,
     Layers,
     Mic,
     RotateCcw,
     User,
     UserPlus,
+    Wrench,
     X,
     type LucideIcon,
 } from "lucide-react";
@@ -65,7 +67,7 @@ type Level = "global" | "character" | "app";
 type SingleBindingField = "apiConfigId" | "voiceConfigId" | "presetId" | "userIdentityId";
 type MultiBindingField = "worldBookIds" | "regexIds";
 type BindingField = SingleBindingField | MultiBindingField;
-type AuxBindingField = "memorySummaryApiConfigId" | "embeddingApiConfigId" | "mascotApiConfigId";
+type AuxBindingField = "memorySummaryApiConfigId" | "embeddingApiConfigId" | "mascotApiConfigId" | "reasoningTranslateApiConfigId" | "qaApiConfigId";
 
 const BINDING_FIELD_VISUALS: Record<BindingField, { icon: LucideIcon; color: string }> = {
     apiConfigId: { icon: Code2, color: BINDING_ACCENTS.api },
@@ -80,6 +82,8 @@ const AUX_FIELD_VISUALS: Record<AuxBindingField, { icon: LucideIcon; color: stri
     memorySummaryApiConfigId: { icon: Brain, color: BINDING_ACCENTS.memory },
     embeddingApiConfigId: { icon: Box, color: BINDING_ACCENTS.embedding },
     mascotApiConfigId: { icon: Code2, color: BINDING_ACCENTS.api },
+    reasoningTranslateApiConfigId: { icon: Languages, color: BINDING_ACCENTS.voice },
+    qaApiConfigId: { icon: Wrench, color: BINDING_ACCENTS.api },
 };
 
 const APP_OVERRIDE_COLORS = CONTENT_APP_ACCENTS;
@@ -226,6 +230,10 @@ export function BindingManager() {
             }
             if (prev.mascotApiConfigId && !validSets.api.has(prev.mascotApiConfigId)) {
                 next.mascotApiConfigId = undefined;
+                dirty = true;
+            }
+            if (prev.qaApiConfigId && !validSets.api.has(prev.qaApiConfigId)) {
+                next.qaApiConfigId = undefined;
                 dirty = true;
             }
             if (dirty) {
@@ -434,6 +442,8 @@ export function BindingManager() {
             case "memorySummaryApiConfigId": return "用于聊天记忆压缩";
             case "embeddingApiConfigId": return "用于语义向量召回";
             case "mascotApiConfigId": return "用于小卷对话与工具调用";
+            case "reasoningTranslateApiConfigId": return "用于翻译思考过程（思维链）内容";
+            case "qaApiConfigId": return "用于工坊答疑、诊断与内容开发";
         }
     };
 
@@ -442,6 +452,8 @@ export function BindingManager() {
             case "memorySummaryApiConfigId": return "记忆总结 API";
             case "embeddingApiConfigId": return "向量召回 API";
             case "mascotApiConfigId": return "小卷助手 API";
+            case "reasoningTranslateApiConfigId": return "思维链翻译 API";
+            case "qaApiConfigId": return "工坊 API";
         }
     };
 
@@ -957,6 +969,8 @@ export function BindingManager() {
                             {renderAuxSelect("memorySummaryApiConfigId", "记忆总结 API")}
                             {renderAuxSelect("embeddingApiConfigId", "向量召回 API")}
                             {renderAuxSelect("mascotApiConfigId", "小卷助手 API")}
+                            {renderAuxSelect("qaApiConfigId", "工坊 API")}
+                            {renderAuxSelect("reasoningTranslateApiConfigId", "思维链翻译 API")}
                         </div>
                     </section>
                 </>

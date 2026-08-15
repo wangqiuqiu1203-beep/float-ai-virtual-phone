@@ -74,13 +74,21 @@ const MINIMAX_EMOTIONS = new Set([
     "happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm", "neutral", "fluent",
 ]);
 
+const MINIMAX_SPEED_MIN = 0.5;
+const MINIMAX_SPEED_MAX = 2.0;
+
+function normalizeMinimaxSpeed(speed: number | undefined): number {
+    if (typeof speed !== "number" || !Number.isFinite(speed)) return 1.0;
+    return Math.min(MINIMAX_SPEED_MAX, Math.max(MINIMAX_SPEED_MIN, speed));
+}
+
 async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?: string): Promise<Blob | null> {
     if (!config.apiKey) throw new Error("Minimax API Key 未配置");
 
     const baseUrl = (config.baseUrl || "https://api.minimaxi.com/v1").replace(/\/$/, "");
     const voiceSetting: Record<string, unknown> = {
         voice_id: config.defaultVoice || "male-qn-qingse",
-        speed: 1.0,
+        speed: normalizeMinimaxSpeed(config.speechSpeed),
         vol: 1.0,
         pitch: 0,
     };
@@ -99,6 +107,7 @@ async function synthesizeMinimax(text: string, config: VoiceApiConfig, emotion?:
             model: config.model || "speech-01-turbo",
             text,
             stream: false,
+            ...(config.languageBoost ? { language_boost: config.languageBoost } : {}),
             voice_setting: voiceSetting,
             // 44100/256k 是 Minimax 支持的最高档;之前 32000/128k 会把 hd 模型
             // 的输出压闷(用户反馈"声音糊"),各模型均支持该档位。
