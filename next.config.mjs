@@ -7,7 +7,7 @@ const isWindows = process.platform === "win32";
 const isWslUncPath = projectRoot.startsWith("\\\\wsl$\\");
 
 function resolveDistDir() {
-  // 本地验证构建可用 NEXT_DIST_DIR 指到独立目录,避免覆写正在跑的 dev server 的 .next
+  // 支持通过 NEXT_DIST_DIR 环境变量覆盖构建输出目录，用于本地构建时复用 dev server 的 .next
   if (process.env.NEXT_DIST_DIR) {
     return process.env.NEXT_DIST_DIR;
   }
@@ -24,13 +24,17 @@ const nextConfig = {
   typedRoutes: true,
   outputFileTracingRoot: projectRoot,
   distDir: resolveDistDir(),
+  // Cloudflare Pages / 静态托管：开启静态导出
+  output: "export",
+  images: {
+    unoptimized: true,
+  },
   eslint: {
     ignoreDuringBuilds: true,
   },
   typescript: {
-    // 项目有若干历史 TS 错误（chat-message-list 缺模块、weixin 路由 socket 字段、
-    // world-builder SceneViewport prop 不匹配 等），不影响 dev 但 production build 会卡。
-    // 跳过 typecheck 让 build 通过；IDE 和 `npx tsc --noEmit` 仍能看到错误。
+    // 项目里有部分类型不太兼容 TS 类型检查（chat-message-list 组件、weixin 助手 socket 兼容等），
+    // 类型检查交给 IDE 和 `npx tsc --noEmit` 即可，不阻塞 build 构建。
     ignoreBuildErrors: true,
   },
   outputFileTracingIncludes: {
@@ -38,9 +42,9 @@ const nextConfig = {
   },
   webpack: (config, { isServer, webpack }) => {
     if (!isServer) {
-      // @gltf-transform/core 的 dist 引用 node:fs / node:path(带 node: 前缀),
-      // 它的 browser 字段只映射了裸 fs/path,webpack 对 node: 前缀报 UnhandledSchemeError。
-      // 客户端包里剥掉前缀,再用 fallback 置空(浏览器路径实际只用 WebIO,不会真调 fs)。
+      // @gltf-transform/core 的 dist 引用 node:fs / node:path（仅 node:），
+      // 部分浏览器 bundle 会用到 node: 前缀导致 UnhandledSchemeError。
+      // 这里做兼容替换，再使用 fallback 兜底（引入 WebIO，不支持 fs）。
       config.plugins.push(
         new webpack.NormalModuleReplacementPlugin(/^node:/, (resource) => {
           resource.request = resource.request.replace(/^node:/, "");
