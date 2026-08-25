@@ -1297,7 +1297,6 @@ export function ToolboxSettings() {
                 const onConfirm = () => { if (isNewRest) confirmDraftRest(); else setEditRestId(null); };
                 const onCancel = () => { if (isNewRest) cancelDraftRest(); else setEditRestId(null); };
                 const title = editRest.builtIn ? editRest.name : (isNewRest ? "添加工具" : "编辑工具");
-                const directFetchInputId = `direct-fetch-${editRest.id}`;
 
                 if (editRest.builtIn) {
                     // Only tools that carry a key in fixedParams (weather/search) need an
@@ -1318,10 +1317,9 @@ export function ToolboxSettings() {
                                     </span>
                                 </div>
                                 )}
-                                <div className="flex items-center gap-2">
-                                    <input type="checkbox" id={directFetchInputId} checked={editRest.directFetch ?? true}
-                                        onChange={e => setR({ directFetch: e.target.checked })} />
-                                    <label htmlFor={directFetchInputId} className="menu-desc">直连模式（跳过服务端代理，无超时限制）</label>
+                                <div className="flex items-center justify-between gap-3">
+                                    <span className="menu-desc">直连模式（跳过服务端代理，无超时限制）</span>
+                                    <Toggle checked={editRest.directFetch ?? true} onChange={c => setR({ directFetch: c })} />
                                 </div>
                             </div>
                         </ContentDialog>
@@ -1359,10 +1357,9 @@ export function ToolboxSettings() {
                                     <option value="POST">POST</option>
                                 </Select>
                             </div>
-                            <div className="flex items-center gap-2">
-                                <input type="checkbox" id={directFetchInputId} checked={editRest.directFetch ?? true}
-                                    onChange={e => setR({ directFetch: e.target.checked })} />
-                                <label htmlFor={directFetchInputId} className="menu-desc">直连模式（跳过服务端代理，无超时限制）</label>
+                            <div className="flex items-center justify-between gap-3">
+                                <span className="menu-desc">直连模式（跳过服务端代理，无超时限制）</span>
+                                <Toggle checked={editRest.directFetch ?? true} onChange={c => setR({ directFetch: c })} />
                             </div>
                             <div className="flex flex-col gap-1">
                                 <label className="menu-desc ml-1">固定参数（API Key 等，不暴露给 AI）</label>
@@ -1574,6 +1571,10 @@ export function ToolboxSettings() {
                             <div className="flex flex-col gap-1">
                                 <label className="menu-desc ml-1">服务器 URL</label>
                                 <Input value={editMcp.url} placeholder="https://mcp-server.example.com" onChange={e => setM({ url: e.target.value })} />
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                                <span className="menu-desc">直连模式（浏览器直接请求，本机/内网 MCP 必开；需服务器允许 CORS，仅支持 Streamable HTTP）</span>
+                                <Toggle className="flex-none" checked={editMcp.directFetch ?? false} onChange={c => setM({ directFetch: c })} />
                             </div>
                             <div className="flex flex-col gap-1">
                                 <label className="menu-desc ml-1">工具描述</label>
@@ -1938,8 +1939,9 @@ function FixedParamsEditor({
         <div className="flex flex-col gap-2">
             {entries.map(([key, value], i) => (
                 <div key={i} className="flex gap-2 items-center">
-                    <Input className="flex-1" value={key} placeholder={keyPlaceholder} onChange={e => update(key, e.target.value, value)} />
-                    <Input className="flex-[2]" value={value} placeholder={valuePlaceholder}
+                    {/* min-w-0：input 固有最小宽度 ~170px，不放开的话两个输入框会把窄弹窗撑出横向滚动 */}
+                    <Input className="flex-1 min-w-0" value={key} placeholder={keyPlaceholder} onChange={e => update(key, e.target.value, value)} />
+                    <Input className="flex-[2] min-w-0" value={value} placeholder={valuePlaceholder}
                         type={key.toLowerCase().includes("key") || key.toLowerCase().includes("token") || key.toLowerCase().includes("secret") ? "password" : "text"}
                         onChange={e => update(key, key, e.target.value)} />
                     <button onClick={() => remove(key)} className="ui-link-btn" data-variant="muted"><Trash2 size={13} /></button>

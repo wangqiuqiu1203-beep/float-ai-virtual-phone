@@ -1,0 +1,11 @@
+{
+  "sdkVersion": "1.0",
+  "id": "doujin.forum",
+  "name": "同人论坛",
+  "version": "1.0.0",
+  "author": "同人论坛",
+  "description": "同人创作社区：浏览/发布同人创作、磕CP、收藏书架、AI 产粮。支持帖子、评论、排行榜、自定义标签。数据保存在本机。",
+  "icon": "icon.png",
+  "entry": "index.html",
+  "permissions": []
+}

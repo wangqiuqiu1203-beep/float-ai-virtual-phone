@@ -59,6 +59,13 @@ import {
     type LLMMessage,
     type GroupMemberData,
 } from "./llm-prompt-assembler";
+import {
+    getStatusRegionConfig,
+    resolveStatusRegionSection,
+    resolveStatusRegionExampleLine,
+    resolveStatusRegionComposition,
+    resolveStatusRegionFullExample,
+} from "./chat-status-region";
 import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
@@ -451,6 +458,9 @@ const offlineBilingualInstruction = session.universalTranslationMode
             "group",
             session.offlineBilingualTranslationPrompt,
         );
+    // 状态区（自定义状态栏）：群聊与单聊同一套配置，按会话存；群聊变体的 native 原文
+    // 与单聊不同，custom 挡还会补一条"每个发言角色各出一份"的群规则。
+    const statusRegionCfg = getStatusRegionConfig(session.id);
     const groupRoster = buildGroupRosterMacro(
         session,
         members.map(m => ({ id: m.character.id, name: m.character.name })),
@@ -485,6 +495,10 @@ const offlineBilingualInstruction = session.universalTranslationMode
         groupRoster,
         customAppRichMediaDirectives,
         chatBilingualInstruction,
+        statusRegionSection: resolveStatusRegionSection(statusRegionCfg, "group"),
+        statusRegionExampleLine: resolveStatusRegionExampleLine(statusRegionCfg),
+        statusRegionComposition: resolveStatusRegionComposition(statusRegionCfg),
+        statusRegionFullExample: resolveStatusRegionFullExample(statusRegionCfg),
         offlineBilingualInstruction,
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
